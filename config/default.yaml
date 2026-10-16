@@ -1,0 +1,57 @@
+# voice-agent default config. Values ${LIKE_THIS} come from the environment (empty if unset).
+# A profile (VOICE_PROFILE=mahadeva) overlays this file; VOICE_CONFIG=/path.yaml overlays again.
+service:
+  host: 0.0.0.0
+  port: 8090
+  data_dir: ${VOICE_DATA_DIR:-/data}        # usage.json (monthly spend per provider)
+  tokens: ["${VOICE_TOKEN}"]                # page/widget/API token(s); empty list = open (never on a public host)
+  language: en-GB
+  max_utterance_seconds: 60
+
+brain:
+  url: ${BRAIN_URL}                         # any OpenAI-compatible /v1 base, e.g. http://jarvis-hermes-bridge:8077/v1
+  api_key: ${BRAIN_API_KEY}
+  model: ${BRAIN_MODEL:-mahadeva}
+  timeout_seconds: 180
+  system_prompt: ""                         # sent as a system message when non-empty (the Hermes bridge ignores it)
+  first_turn_prefix: "You are being spoken to through a voice interface. Answer in short spoken sentences, no markdown, no lists; summarise instead of quoting files."
+  send_history: false                       # the bridge keeps history itself (prompt_cache_key); set true for stateless brains
+  min_sentence_chars: 24
+
+waterfall:
+  timeout_seconds: 8                        # per paid provider call (decision 4a)
+  local_timeout_seconds: 60                 # the CPU floor is slow but free
+  cooldown_minutes: 15
+  default_monthly_budget_usd: 10
+
+providers:
+  openai:
+    api_key: ${OPENAI_API_KEY}
+    stt_model: gpt-4o-mini-transcribe
+    tts_model: gpt-4o-mini-tts
+    voice: coral
+    tts_instructions: "Speak clearly and briskly, British English."
+    budget_usd: 10
+  azure:
+    key: ${AZURE_SPEECH_KEY}
+    region: ${AZURE_SPEECH_REGION:-swedencentral}
+    voice: en-GB-RyanNeural
+    output_format: audio-24khz-48kbitrate-mono-mp3
+    budget_usd: 10
+  gemini:
+    api_key: ${GEMINI_API_KEY}
+    stt_model: ${GEMINI_STT_MODEL:-gemini-3.8-flash}
+    tts_model: ${GEMINI_TTS_MODEL:-gemini-2.5-flash-preview-tts}
+    voice: Kore
+    budget_usd: 10
+  local:
+    enabled: true
+    models_dir: ${VOICE_MODELS_DIR:-/models}
+    whisper_model: small
+    compute_type: int8
+    threads: 4
+    piper_voice: en_GB-alan-medium
+
+legs:                                       # order = waterfall order; local last = the free floor
+  stt: [openai, azure, gemini, local]
+  tts: [openai, azure, gemini, local]

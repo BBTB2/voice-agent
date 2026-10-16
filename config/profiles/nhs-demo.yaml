@@ -1,0 +1,17 @@
+# NHS clinical demo profile (decision 5b): Microsoft-only speech path, EU/UK region, no OpenAI or Google
+# traffic, local floor kept so the demo never goes silent. Runs on SYNTHETIC cases only; see
+# voice/docs/nhs-ig-note.md for the deployment shape a trust would need before any real patient data.
+service:
+  language: en-GB
+brain:
+  # In a trust deployment this is an Azure OpenAI endpoint inside the trust tenant; on asgard it is
+  # Mahadeva's bridge so the demo has a brain. Either way the brain is a config line, not code.
+  url: ${BRAIN_URL:-http://jarvis-hermes-bridge:8077/v1}
+  first_turn_prefix: "Voice interface for a clinical DEMO on synthetic cases only. No real patient data is present. Answer in short spoken sentences, no markdown. If asked to record anything identifiable, say that this demo cannot."
+providers:
+  azure:
+    region: ${AZURE_SPEECH_REGION:-swedencentral}   # uksouth for UK residency when the resource lives there
+    voice: en-GB-SoniaNeural
+legs:
+  stt: [azure, local]
+  tts: [azure, local]

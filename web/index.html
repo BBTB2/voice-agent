@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mahadeva voice</title>
+<style>
+  :root { color-scheme: light dark; --bg:#0f1115; --fg:#e8e8e8; --mute:#8a8f98; --acc:#d9842b; --ok:#3fb950; --bad:#f85149; --card:#181b22; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f6f6f4; --fg:#15171c; --mute:#5c616b; --card:#ffffff; } }
+  body { margin:0; font: 16px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); padding:16px; max-width:720px; margin-inline:auto; }
+  h1 { font-size:20px; margin:8px 0 4px; } .sub { color:var(--mute); font-size:13px; margin-bottom:16px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input[type=text], input[type=password] { flex:1; min-width:160px; padding:10px 12px; border-radius:8px; border:1px solid #3a3f4a; background:var(--card); color:var(--fg); }
+  button { padding:10px 16px; border-radius:8px; border:0; background:var(--acc); color:#fff; font-weight:600; cursor:pointer; }
+  button.secondary { background:#3a3f4a; } button:disabled { opacity:.5; cursor:default; }
+  #talk { width:100%; padding:22px; font-size:18px; margin:12px 0; border-radius:14px; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #talk.rec { background:var(--bad); }
+  #log { background:var(--card); border-radius:12px; padding:12px; min-height:200px; max-height:50vh; overflow:auto; font-size:15px; }
+  .u { color:var(--acc); } .a { } .s { color:var(--mute); font-size:13px; } .e { color:var(--bad); }
+  .msg { margin:6px 0; white-space:pre-wrap; }
+  #prov { font-size:12px; color:var(--mute); margin-top:8px; }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+<h1>Mahadeva voice</h1>
+<div class="sub">Hold the button, speak, release. The transcript goes to the brain; the reply is spoken sentence by sentence. <a href="/nhs/">NHS demo</a> · <a href="/nhs/reach.html">reachability test</a></div>
+<div class="row" id="auth">
+  <input type="password" id="token" placeholder="service token" autocomplete="off">
+  <button id="connect">Connect</button>
+</div>
+<button id="talk" disabled>Hold to talk</button>
+<div class="row">
+  <input type="text" id="typed" placeholder="or type a message and press Enter" disabled>
+  <button class="secondary" id="stop">Stop</button>
+  <button class="secondary" id="new">New chat</button>
+</div>
+<div id="log"></div>
+<div id="prov"></div>
+<script src="/voice.js"></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const log = $("log");
+  const line = (cls, text) => { const d = document.createElement("div"); d.className = "msg " + cls; d.textContent = text; log.appendChild(d); log.scrollTop = log.scrollHeight; return d; };
+  let agent = null, current = null;
+  $("token").value = localStorage.getItem("voice_token") || "";
+  function connect() {
+    const token = $("token").value.trim();
+    localStorage.setItem("voice_token", token);
+    if (agent) agent.close();
+    agent = new VoiceAgent({ url: location.origin, token, debug: false });
+    agent.on("ready", (m) => { line("s", `connected · profile ${m.profile} · stt ${m.stt.join(">")} · tts ${m.tts.join(">")} · brain ${m.brain || "none"}`); $("talk").disabled = false; $("typed").disabled = false; });
+    agent.on("transcript", (m) => { if (m.text) line("u", "You: " + m.text); else line("s", "(heard nothing)"); current = null; });
+    agent.on("token", (m) => { if (!current) current = line("a", ""); current.textContent += m.text; log.scrollTop = log.scrollHeight; });
+    agent.on("sentence", (m) => { $("prov").textContent = `last voice: ${m.provider}`; });
+    agent.on("playing", (m) => { $("prov").textContent = `speaking (${m.seconds.toFixed(1)} s) · last voice: ${agent.lastProvider || "?"}`; });
+    agent.on("status", (m) => line("s", m.text));
+    agent.on("error", (m) => line("e", m.text));
+    agent.on("done", (m) => { current = null; if (m.turn_ms) $("prov").textContent += ` · turn ${(m.turn_ms/1000).toFixed(1)} s`; });
+    agent.on("close", () => { line("s", "disconnected"); $("talk").disabled = true; $("typed").disabled = true; });
+    agent.unlock();
+    agent.connect();
+  }
+  $("connect").onclick = connect;
+  const talk = $("talk");
+  const down = (e) => { e.preventDefault(); if (!agent || talk.disabled) return; talk.classList.add("rec"); talk.textContent = "Listening… release to send"; agent.startRecording().catch((err) => line("e", "mic: " + err.message)); };
+  const up = (e) => { e.preventDefault(); if (!agent) return; talk.classList.remove("rec"); talk.textContent = "Hold to talk"; agent.stopRecording(); };
+  talk.addEventListener("pointerdown", down); talk.addEventListener("pointerup", up); talk.addEventListener("pointercancel", up); talk.addEventListener("pointerleave", (e) => { if (talk.classList.contains("rec")) up(e); });
+  talk.addEventListener("keydown", (e) => { if (e.code === "Space" && !e.repeat) down(e); }); talk.addEventListener("keyup", (e) => { if (e.code === "Space") up(e); });
+  $("typed").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.value.trim()) { agent.sendText(e.target.value.trim()); e.target.value = ""; } });
+  $("stop").onclick = () => agent && agent.cancel();
+  $("new").onclick = () => { if (agent) { agent.reset(); log.innerHTML = ""; } };
+  if ($("token").value) connect();
+})();
+</script>
+</body>
+</html>

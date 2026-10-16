@@ -1,0 +1,9 @@
+# Pinned at stage 6 start (16 Oct 2026), D11: bump deliberately, never mid-stage.
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+pyyaml==6.0.3
+python-multipart==0.0.20
+# local floor (CPU only)
+faster-whisper==1.2.1
+piper-tts==1.8.0

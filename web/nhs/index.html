@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice assistant: NHS demo</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f4f6f8; --fg:#1b2430; --mute:#5a6675; --acc:#005eb8; --card:#fff; --bad:#d5281b; --ok:#007f3b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#10151c; --fg:#e6ebf0; --mute:#97a3b1; --card:#1a212b; } }
+  body { margin:0; font:16px/1.5 "Frutiger", Arial, sans-serif; background:var(--bg); color:var(--fg); padding:16px; max-width:760px; margin-inline:auto; }
+  h1 { font-size:22px; margin:6px 0; } h2 { font-size:16px; margin:18px 0 6px; }
+  .banner { background:#ffeb3b22; border-left:4px solid #e0a800; padding:8px 12px; border-radius:6px; font-size:14px; margin:10px 0; }
+  .card { background:var(--card); border-radius:10px; padding:14px; margin:10px 0; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input { flex:1; min-width:160px; padding:10px 12px; border-radius:8px; border:1px solid #9aa5b1; background:var(--card); color:var(--fg); }
+  button { padding:10px 16px; border-radius:8px; border:0; background:var(--acc); color:#fff; font-weight:600; cursor:pointer; }
+  button.secondary { background:#4c6072; } button:disabled { opacity:.5; }
+  #talk { width:100%; padding:22px; font-size:18px; margin:12px 0; border-radius:14px; touch-action:none; user-select:none; -webkit-user-select:none; } #talk.rec { background:var(--bad); }
+  #log { min-height:160px; max-height:45vh; overflow:auto; font-size:15px; } .msg { margin:6px 0; white-space:pre-wrap; } .u { color:var(--acc); } .s,.small { color:var(--mute); font-size:13px; } .e { color:var(--bad); }
+  details summary { cursor:pointer; font-weight:600; } ul { margin:6px 0 0 18px; padding:0; } a { color:var(--acc); }
+  .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px; background:#005eb822; margin-right:4px; }
+</style>
+</head>
+<body>
+<h1>Voice assistant: clinical demo</h1>
+<div class="banner"><b>Synthetic cases only.</b> Nothing on this page is, or may be, real patient data. The demo shows the deployment shape a trust would run; see the <a href="/docs/nhs-ig-note.md">information governance note</a>.</div>
+<div class="card">
+  <span class="pill">Speech: Microsoft Azure AI Speech (EU/UK region)</span><span class="pill">No OpenAI or Google traffic</span><span class="pill">Brain: configurable, trust-tenant Azure OpenAI in production</span>
+  <div class="small" id="profileline">Connect to see the live provider order of this deployment.</div>
+</div>
+<div class="row"><input type="password" id="token" placeholder="demo token" autocomplete="off"><button id="connect">Connect</button><a href="reach.html"><button class="secondary" type="button">Reachability test</button></a></div>
+<button id="talk" disabled>Hold to talk</button>
+<div class="row"><input type="text" id="typed" placeholder="or type, then Enter" disabled><button class="secondary" id="new">New case</button></div>
+<div class="card" id="log"></div>
+<h2>Demo script (synthetic)</h2>
+<div class="card">
+  <details open><summary>Case A: radiology report dictation and read-back</summary><ul>
+    <li>"Start a chest radiograph report for a synthetic patient, demo case A."</li>
+    <li>Dictate findings; ask it to read the impression back; ask for a plain-English version for the patient letter.</li></ul></details>
+  <details><summary>Case B: hands-free protocol lookup</summary><ul>
+    <li>"What is the standard CT KUB protocol in this department?" (answers come from the configured brain's knowledge, here Mahadeva's workspace).</li></ul></details>
+  <details><summary>Case C: ward handover summary</summary><ul>
+    <li>Read the synthetic handover from <a href="/docs/synthetic-cases.md">synthetic-cases.md</a>; ask for the three open actions.</li></ul></details>
+  <div class="small">Full scripts, what a skeptic will ask, and the honest answers: <a href="/docs/synthetic-cases.md">synthetic-cases.md</a>.</div>
+</div>
+<script src="/voice.js"></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id); const log = $("log");
+  const line = (cls, t) => { const d = document.createElement("div"); d.className = "msg " + cls; d.textContent = t; log.appendChild(d); log.scrollTop = log.scrollHeight; return d; };
+  let agent = null, cur = null;
+  $("token").value = localStorage.getItem("voice_token") || "";
+  function connect() {
+    const token = $("token").value.trim(); localStorage.setItem("voice_token", token);
+    if (agent) agent.close();
+    agent = new VoiceAgent({ url: location.origin, token });
+    agent.on("ready", (m) => { $("profileline").textContent = `profile ${m.profile} · speech-to-text ${m.stt.join(" > ")} · text-to-speech ${m.tts.join(" > ")} · brain ${m.brain || "none"}`; $("talk").disabled = false; $("typed").disabled = false; if (m.profile !== "nhs-demo") line("e", "This deployment is not running the nhs-demo profile; the provider order above is what applies."); });
+    agent.on("transcript", (m) => { if (m.text) line("u", "You: " + m.text); cur = null; });
+    agent.on("token", (m) => { if (!cur) cur = line("a", ""); cur.textContent += m.text; });
+    agent.on("status", (m) => line("s", m.text)); agent.on("error", (m) => line("e", m.text));
+    agent.on("done", () => { cur = null; }); agent.on("close", () => { $("talk").disabled = true; line("s", "disconnected"); });
+    agent.unlock();
+    agent.connect();
+  }
+  $("connect").onclick = connect;
+  const talk = $("talk");
+  const down = (e) => { e.preventDefault(); if (!agent || talk.disabled) return; talk.classList.add("rec"); talk.textContent = "Listening… release to send"; agent.startRecording().catch((err) => line("e", "mic: " + err.message)); };
+  const up = (e) => { e.preventDefault(); if (!agent) return; talk.classList.remove("rec"); talk.textContent = "Hold to talk"; agent.stopRecording(); };
+  talk.addEventListener("pointerdown", down); talk.addEventListener("pointerup", up); talk.addEventListener("pointercancel", up); talk.addEventListener("pointerleave", (e) => { if (talk.classList.contains("rec")) up(e); });
+  $("typed").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.value.trim()) { agent.sendText(e.target.value.trim()); e.target.value = ""; } });
+  $("new").onclick = () => { if (agent) { agent.reset(); log.innerHTML = ""; } };
+  if ($("token").value) connect();
+})();
+</script>
+</body>
+</html>

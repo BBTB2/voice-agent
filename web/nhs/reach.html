@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reachability test</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f4f6f8; --fg:#1b2430; --mute:#5a6675; --acc:#005eb8; --card:#fff; --bad:#d5281b; --ok:#007f3b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#10151c; --fg:#e6ebf0; --mute:#97a3b1; --card:#1a212b; } }
+  body { margin:0; font:16px/1.5 Arial, sans-serif; background:var(--bg); color:var(--fg); padding:16px; max-width:760px; margin-inline:auto; }
+  h1 { font-size:22px; } .small { color:var(--mute); font-size:13px; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; font-size:14px; }
+  td, th { padding:8px 10px; border-bottom:1px solid #8884; text-align:left; vertical-align:top; } th { font-size:13px; color:var(--mute); }
+  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; } .wait { color:var(--mute); }
+  button { padding:10px 16px; border-radius:8px; border:0; background:var(--acc); color:#fff; font-weight:600; cursor:pointer; margin:10px 0; }
+  textarea { width:100%; min-height:90px; font:12px monospace; margin-top:10px; }
+</style>
+</head>
+<body>
+<h1>Can this network reach the voice service and its providers?</h1>
+<p class="small">Run this from the NHS device, on the trust network, in a normal browser. Each row opens one HTTPS connection to the host (no data is sent beyond the request itself). "reachable" means the TLS connection completed; "blocked" means the proxy or filter refused it or it timed out after 8 s. Copy the summary box into the thread.</p>
+<button id="run">Run the test</button>
+<table><thead><tr><th>What</th><th>Host</th><th>Result</th><th>ms</th></tr></thead><tbody id="rows"></tbody></table>
+<textarea id="summary" readonly placeholder="summary appears here"></textarea>
+<script>
+const TARGETS = [
+  ["This voice service (page + WebSocket)", location.origin + "/healthz"],
+  ["Azure Speech, text-to-speech, Sweden Central", "https://swedencentral.tts.speech.microsoft.com/cognitiveservices/voices/list"],
+  ["Azure Speech, speech-to-text, Sweden Central", "https://swedencentral.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1"],
+  ["Azure Speech, text-to-speech, UK South", "https://uksouth.tts.speech.microsoft.com/cognitiveservices/voices/list"],
+  ["Azure AI Services resource endpoint", "https://azure-voice-mahadeva.cognitiveservices.azure.com/"],
+  ["Azure OpenAI host pattern", "https://azure-voice-mahadeva.openai.azure.com/"],
+  ["Microsoft identity (M365 baseline)", "https://login.microsoftonline.com/"],
+  ["Microsoft Graph (M365 baseline)", "https://graph.microsoft.com/"],
+  ["OpenAI API", "https://api.openai.com/v1/models"],
+  ["Google Gemini API", "https://generativelanguage.googleapis.com/"],
+  ["Google Cloud Speech", "https://speech.googleapis.com/"],
+];
+async function probe(url) {
+  const t0 = performance.now();
+  const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    // no-cors: an opaque response still proves the connection and TLS handshake succeeded.
+    await fetch(url, { mode: "no-cors", cache: "no-store", signal: ctl.signal, credentials: "omit" });
+    return ["reachable", Math.round(performance.now() - t0)];
+  } catch (e) {
+    return [e.name === "AbortError" ? "blocked (timeout)" : "blocked", Math.round(performance.now() - t0)];
+  } finally { clearTimeout(timer); }
+}
+document.getElementById("run").onclick = async () => {
+  const tb = document.getElementById("rows"); tb.innerHTML = ""; const lines = [`reachability ${new Date().toISOString()} ua=${navigator.userAgent}`];
+  for (const [what, url] of TARGETS) {
+    const tr = document.createElement("tr"); tr.innerHTML = `<td>${what}</td><td>${new URL(url).host}</td><td class="wait">testing…</td><td></td>`; tb.appendChild(tr);
+    const [res, ms] = await probe(url);
+    tr.children[2].textContent = res; tr.children[2].className = res === "reachable" ? "ok" : "bad"; tr.children[3].textContent = ms;
+    lines.push(`${res.padEnd(18)} ${String(ms).padStart(5)}ms  ${new URL(url).host}  (${what})`);
+  }
+  const mic = navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? "available (secure context)" : "unavailable (needs https)";
+  lines.push(`microphone API: ${mic}`); lines.push(`MediaRecorder: ${window.MediaRecorder ? "yes" : "no"}`);
+  document.getElementById("summary").value = lines.join("\n");
+};
+</script>
+</body>
+</html>

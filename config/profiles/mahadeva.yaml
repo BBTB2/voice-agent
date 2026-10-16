@@ -1,0 +1,7 @@
+# Mahadeva on asgard: the stage 4 bridge is the brain; all three paid providers then the local floor.
+brain:
+  url: ${BRAIN_URL:-http://jarvis-hermes-bridge:8077/v1}
+  model: mahadeva
+legs:
+  stt: [openai, azure, gemini, local]
+  tts: [openai, azure, gemini, local]
