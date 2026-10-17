@@ -4,6 +4,7 @@ uvicorn[standard]==0.54.0
 httpx==0.28.1
 pyyaml==6.0.3
 python-multipart==0.0.20
+cryptography==46.0.7     # google provider: RS256 JWT for the service-account token grant
 # local floor (CPU only)
 faster-whisper==1.2.1
 piper-tts==1.8.0

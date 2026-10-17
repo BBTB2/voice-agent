@@ -3,5 +3,5 @@ brain:
   url: ${BRAIN_URL:-http://jarvis-hermes-bridge:8077/v1}
   model: mahadeva
 legs:
-  stt: [openai, azure, gemini, local]
-  tts: [openai, azure, gemini, local]
+  stt: [openai, azure, google, gemini, local]
+  tts: [openai, azure, google, gemini, local]
