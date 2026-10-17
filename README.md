@@ -6,10 +6,22 @@ each speech leg sit in an ordered **waterfall**: OpenAI, Azure AI Speech, Google
 floor (faster-whisper + Piper) that never goes on quota. One container, one YAML per deployment, one
 `<script>` tag per site.
 
-First consumer: Mahadeva (shambho-jarvis stage 6), whose brain is the stage 4 Hermes bridge. Decisions and
-economics: `/mnt/project-files/voice-agent/plan.md` in the Shambho project, `docs/decisions.md` D23+ here.
-This folder is self-contained so it can move to its own repository (`git subtree split -P voice`) without
-edits; nothing in it imports from the rest of shambho-jarvis.
+This is its own repository (BBTB2/voice-agent, private, since 17 Oct 2026). First consumer: Mahadeva
+(BBTB2/shambho-jarvis), whose brain is the Hermes bridge and which carries this repo as the `voice/` subtree.
+Decisions and economics: `/mnt/project-files/voice-agent/plan.md` in the Shambho project, `docs/decisions.md`
+D23 and D26 in shambho-jarvis. Nothing here imports from any other project.
+
+## Use it in another project
+
+Two ways, pick one per project:
+
+- **Run the container** beside your app and point it at your brain: `docker build -t voice-agent .` then the
+  `docker run` line below with `BRAIN_URL` = any OpenAI-compatible `/v1` base, and drop
+  `<script src="https://your-host/voice.js">` + `new VoiceAgent({url, token})` into the page.
+- **Vendor the code as a subtree** (what shambho-jarvis does), so the consuming repo needs no second deploy key:
+  `git subtree add --prefix voice https://github.com/BBTB2/voice-agent.git main --squash` once, then
+  `git subtree pull --prefix voice https://github.com/BBTB2/voice-agent.git main --squash` to update, and
+  `git subtree push --prefix voice https://github.com/BBTB2/voice-agent.git main` to send fixes made in place back here.
 
 ```
 browser / any site ── voice.js (push-to-talk, playback) ──WebSocket──▶ voice-agent
