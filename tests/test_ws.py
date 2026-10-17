@@ -88,7 +88,7 @@ def test_healthz_and_auth(app):
     assert h["ok"] and h["stt"] == ["openai", "azure"] and h["brain"]
     assert c.get("/api/status").status_code == 401
     st = c.get("/api/status?token=secret").json()
-    assert st["waterfall"]["legs"]["tts"]["order"] == ["openai", "azure", "gemini", "local"]
+    assert st["waterfall"]["legs"]["tts"]["order"] == ["openai", "azure", "google", "gemini", "local"]
     assert c.get("/").status_code == 200 and "VoiceAgent" in c.get("/voice.js").text
     assert c.get("/nhs/").status_code == 200 and c.get("/nhs/reach.html").status_code == 200
     assert "DPIA" in c.get("/docs/nhs-ig-note.md").text

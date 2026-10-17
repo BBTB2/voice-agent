@@ -2,20 +2,32 @@
 
 A standalone voice front end with **no brain inside**. It turns speech into text, sends the text to any
 OpenAI-compatible chat endpoint, and speaks the reply, sentence by sentence as it streams. Providers for
-each speech leg sit in an ordered **waterfall**: OpenAI, Azure AI Speech, Google Gemini, then a free local
+each speech leg sit in an ordered **waterfall**: OpenAI, Azure AI Speech, Google Cloud Speech, Google Gemini, then a free local
 floor (faster-whisper + Piper) that never goes on quota. One container, one YAML per deployment, one
 `<script>` tag per site.
 
-First consumer: Mahadeva (shambho-jarvis stage 6), whose brain is the stage 4 Hermes bridge. Decisions and
-economics: `/mnt/project-files/voice-agent/plan.md` in the Shambho project, `docs/decisions.md` D23+ here.
-This folder is self-contained so it can move to its own repository (`git subtree split -P voice`) without
-edits; nothing in it imports from the rest of shambho-jarvis.
+This is its own repository (BBTB2/voice-agent, private, since 17 Oct 2026). First consumer: Mahadeva
+(BBTB2/shambho-jarvis), whose brain is the Hermes bridge and which carries this repo as the `voice/` subtree.
+Decisions and economics: `/mnt/project-files/voice-agent/plan.md` in the Shambho project, `docs/decisions.md`
+D23 and D26 in shambho-jarvis. Nothing here imports from any other project.
+
+## Use it in another project
+
+Two ways, pick one per project:
+
+- **Run the container** beside your app and point it at your brain: `docker build -t voice-agent .` then the
+  `docker run` line below with `BRAIN_URL` = any OpenAI-compatible `/v1` base, and drop
+  `<script src="https://your-host/voice.js">` + `new VoiceAgent({url, token})` into the page.
+- **Vendor the code as a subtree** (what shambho-jarvis does), so the consuming repo needs no second deploy key:
+  `git subtree add --prefix voice https://github.com/BBTB2/voice-agent.git main --squash` once, then
+  `git subtree pull --prefix voice https://github.com/BBTB2/voice-agent.git main --squash` to update, and
+  `git subtree push --prefix voice https://github.com/BBTB2/voice-agent.git main` to send fixes made in place back here.
 
 ```
 browser / any site ── voice.js (push-to-talk, playback) ──WebSocket──▶ voice-agent
-                                                                       ├─ STT waterfall  openai > azure > gemini > local
+                                                                       ├─ STT waterfall  openai > azure > google > gemini > local
                                                                        ├─ brain          POST /v1/chat/completions (stream), prompt_cache_key = session
-                                                                       └─ TTS waterfall  openai > azure > gemini > local
+                                                                       └─ TTS waterfall  openai > azure > google > gemini > local
 ```
 
 ## Run
@@ -67,8 +79,8 @@ cooling (15 min after a 429, 5xx, timeout over 8 s, or any adapter error). A non
 400, missing model) parks the provider until restart or `/api/reset`. The local floor has no budget and
 a 60 s timeout. `VOICE_FAIL_PROVIDERS=openai,azure` forces failures for testing.
 
-Estimated cost per conversation minute (30 s speech each way): OpenAI ~$0.01, Azure ~$0.015, Gemini
-~$0.005 (preview pricing), local $0. Brain cost is separate and the same on every path.
+Estimated cost per conversation minute (30 s speech each way): OpenAI ~$0.01, Azure ~$0.015, Google Cloud
+~$0.019 (Neural2 voice; ~$0.014 with a Standard voice), Gemini ~$0.005 (preview pricing), local $0. Brain cost is separate and the same on every path.
 
 ## Providers
 
@@ -76,8 +88,14 @@ Estimated cost per conversation minute (30 s speech each way): OpenAI ~$0.01, Az
 - **azure**: Azure AI Speech REST, short-audio STT (≤60 s utterances) + neural TTS, works with an
   AIServices multi-service key. Env `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`.
 - **gemini**: Gemini API (AI Studio key): audio understanding as STT, Gemini TTS (PCM → WAV). Env
-  `GEMINI_API_KEY`; models overridable with `GEMINI_STT_MODEL`, `GEMINI_TTS_MODEL`. Google Cloud
-  Speech adapters come when Rock's Cloud billing review clears.
+  `GEMINI_API_KEY`; models overridable with `GEMINI_STT_MODEL`, `GEMINI_TTS_MODEL`.
+- **google**: Google Cloud Speech-to-Text v1 (sync recognize, `latest_short`, LINEAR16) + Text-to-Speech v1
+  (`en-GB-Neural2-B`, mp3). Needs a Cloud project with both APIs enabled and billing on. Credential is
+  either `GOOGLE_SPEECH_API_KEY` (API key restricted to the two APIs) or `GOOGLE_SPEECH_CREDENTIALS_B64`
+  (service-account JSON, base64; the adapter mints its own OAuth token, RS256 via `cryptography`).
+  `GOOGLE_TTS_VOICE` picks the voice and with it the price tier (Standard $4/M chars, Neural2 $16/M,
+  Chirp3-HD $30/M); `GOOGLE_STT_MODEL` the STT model. Data logging is off, so STT is $0.024/min after the
+  free 60 min a month.
 - **local**: faster-whisper `small` int8 + Piper `en_GB-alan-medium`, baked into the image.
 
 Adding a provider = one file in `voice_agent/providers/` with `transcribe()` and `synthesize()`, one
@@ -85,7 +103,7 @@ line in `providers/__init__.py`, one block in the YAML.
 
 ## Profiles
 
-- `mahadeva`: all four providers, brain = `http://jarvis-hermes-bridge:8077/v1`.
+- `mahadeva`: all five providers, brain = `http://jarvis-hermes-bridge:8077/v1`.
 - `nhs-demo`: Azure then local only, EU/UK region, synthetic-cases banner, IG note. Decision 5b.
 
 ## Tests

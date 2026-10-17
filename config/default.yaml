@@ -38,6 +38,14 @@ providers:
     voice: en-GB-RyanNeural
     output_format: audio-24khz-48kbitrate-mono-mp3
     budget_usd: 10
+  google:                                   # Google Cloud Speech (STT v1 + TTS v1); needs the two APIs enabled
+    api_key: ${GOOGLE_SPEECH_API_KEY}        # an API key restricted to the two Speech APIs, OR
+    credentials_b64: ${GOOGLE_SPEECH_CREDENTIALS_B64}   # a service-account JSON key, base64 one line
+    stt_model: ${GOOGLE_STT_MODEL:-latest_short}
+    data_logging: false                     # true = $0.016/min instead of $0.024 but Google may keep audio
+    voice: ${GOOGLE_TTS_VOICE:-en-GB-Neural2-B}   # Standard-* $4/M chars, Neural2 $16/M, Chirp3-HD $30/M
+    output_format: MP3
+    budget_usd: 10
   gemini:
     api_key: ${GEMINI_API_KEY}
     stt_model: ${GEMINI_STT_MODEL:-gemini-3.8-flash}
@@ -53,5 +61,5 @@ providers:
     piper_voice: en_GB-alan-medium
 
 legs:                                       # order = waterfall order; local last = the free floor
-  stt: [openai, azure, gemini, local]
-  tts: [openai, azure, gemini, local]
+  stt: [openai, azure, google, gemini, local]
+  tts: [openai, azure, google, gemini, local]

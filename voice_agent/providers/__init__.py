@@ -6,9 +6,10 @@ REGISTRY: dict[str, type[Provider]] = {}
 def _register() -> None:
     from .azure import AzureProvider
     from .gemini import GeminiProvider
+    from .google import GoogleProvider
     from .local import LocalProvider
     from .openai import OpenAIProvider
-    for cls in (OpenAIProvider, AzureProvider, GeminiProvider, LocalProvider):
+    for cls in (OpenAIProvider, AzureProvider, GoogleProvider, GeminiProvider, LocalProvider):
         REGISTRY[cls.name] = cls
 
 
