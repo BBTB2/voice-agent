@@ -20,6 +20,7 @@ from . import __version__
 from .audio import AudioError, to_wav16k, wav_duration_seconds
 from .brain import Brain, BrainError, SentenceSplitter, speakable
 from .config import HERE, load_config
+from .fallback import TelegramVoiceNote
 from .providers import build_providers
 from .waterfall import Exhausted, Waterfall
 
@@ -31,13 +32,24 @@ SERVICE = CFG.get("service") or {}
 DATA_DIR = Path(SERVICE.get("data_dir") or os.environ.get("VOICE_DATA_DIR", "/data"))
 TOKENS = {t for t in (SERVICE.get("tokens") or []) if t}
 LANGUAGE = SERVICE.get("language", "en-GB")
+KEEPALIVE_SECONDS = float(SERVICE.get("keepalive_seconds", 25))
 MAX_SECONDS = float(SERVICE.get("max_utterance_seconds", 60))
+# Browser origins allowed to use the API and the WebSocket besides the page's own host (the sites that
+# embed voice.js). Comma-separated, scheme included. Requests without an Origin header (curl, scripts)
+# are judged by the token alone.
+ALLOWED_ORIGINS = {o.strip().rstrip("/").lower() for o in str(SERVICE.get("allowed_origins") or "").split(",") if o.strip()}
 PROVIDERS = build_providers(CFG)
 WF = Waterfall(CFG, PROVIDERS, DATA_DIR)
 BRAIN = Brain(CFG.get("brain") or {})
+FALLBACK = TelegramVoiceNote(CFG.get("fallback") or {})
+DETACHED: set[asyncio.Task] = set()   # turns finishing after their browser went away (so the voice note is complete)
 WEB = HERE / "web"
 
 app = FastAPI(title="voice-agent", version=__version__, docs_url=None, redoc_url=None)
+if ALLOWED_ORIGINS:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(CORSMiddleware, allow_origins=sorted(ALLOWED_ORIGINS), allow_methods=["GET", "POST"],
+                       allow_headers=["Authorization", "Content-Type"])
 
 
 # -- auth -----------------------------------------------------------------------------------
@@ -45,6 +57,16 @@ def _ok_token(token: str | None) -> bool:
     if not TOKENS:
         return True
     return any(secrets.compare_digest(token or "", t) for t in TOKENS)
+
+
+def _origin_ok(origin: str | None, host: str | None) -> bool:
+    """Same-origin always; a foreign browser origin only when listed. No Origin header = not a browser."""
+    if not origin:
+        return True
+    o = origin.rstrip("/").lower()
+    if host and o.split("://", 1)[-1] == host.lower():
+        return True
+    return o in ALLOWED_ORIGINS
 
 
 def _require(token: str | None, authorization: str | None = None) -> None:
@@ -210,10 +232,19 @@ class Turn:
         self.session = session
         self.history = history
         self.cancelled = False
+        self.lost = False                      # the browser went away mid-reply
+        self.reply = ""
+        self.clips: list[tuple[str, bytes]] = []   # (mime, audio) per spoken sentence, for the fallback / resend
 
     async def send(self, **msg: Any) -> None:
-        if not self.cancelled:
+        if self.cancelled or self.lost:
+            return
+        try:
             await self.ws.send_text(json.dumps(msg))
+        except (WebSocketDisconnect, RuntimeError) as e:
+            # The socket is gone. Keep producing the reply so the voice-note fallback carries all of it.
+            self.lost = True
+            LOG.info("browser lost mid-reply (%s); finishing for the fallback", str(e)[:80])
 
     async def fallthrough(self, leg: str):
         async def _cb(name: str, reason: str, nxt: str | None) -> None:
@@ -263,11 +294,20 @@ class Turn:
             self.history.append({"role": "user", "content": text})
             self.history.append({"role": "assistant", "content": reply})
             del self.history[:-20]
+            self.reply = reply
             await self.send(type="done", turn_ms=int((time.monotonic() - t0) * 1000), reply=reply)
+            if self.lost and reply.strip() and FALLBACK.configured():
+                await self.forward("The voice page lost you, so here is the reply as a voice note.")
         except (AudioError, BrainError, Exhausted) as e:
             LOG.warning("turn failed: %s", e)
             await self.send(type="error", text=str(e)[:400])
             await self.send(type="done", turn_ms=int((time.monotonic() - t0) * 1000))
+
+    async def forward(self, note: str = "") -> str:
+        """Send this turn's reply to Telegram as a voice note (the same audio the page would have played)."""
+        how = await FALLBACK.send(self.reply, list(self.clips), note)
+        LOG.info("reply forwarded to Telegram as %s (%d clips, %d chars)", how, len(self.clips), len(self.reply))
+        return how
 
     async def _speak(self, queue: asyncio.Queue[str | None]) -> None:
         seq = 0
@@ -285,6 +325,7 @@ class Turn:
                 seq += 1
                 continue
             seq += 1
+            self.clips.append((res.mime, res.audio))
             await self.send(type="sentence", text=sentence, provider=name, seq=seq)
             await self.send(type="audio", seq=seq, mime=res.mime, b64=base64.b64encode(res.audio).decode(), provider=name)
 
@@ -294,6 +335,10 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
     if not _ok_token(token):
         await ws.close(code=4401)
         return
+    if not _origin_ok(ws.headers.get("origin"), ws.headers.get("host")):
+        LOG.warning("ws refused: origin %s not allowed", ws.headers.get("origin"))
+        await ws.close(code=4403)
+        return
     await ws.accept()
     session = session or f"voice-{uuid.uuid4().hex[:12]}"
     history: list[dict] = []
@@ -302,7 +347,18 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
     turn: Turn | None = None
     await ws.send_text(json.dumps({"type": "ready", "session": session, "profile": SERVICE.get("profile"),
                                    "stt": WF.candidates("stt"), "tts": WF.candidates("tts"),
-                                   "brain": BRAIN.model if BRAIN.configured() else None}))
+                                   "brain": BRAIN.model if BRAIN.configured() else None,
+                                   "fallback": "telegram" if FALLBACK.configured() else None}))
+    async def _keepalive() -> None:
+        # Cloudflare (and some phones) drop a WebSocket with no frames for ~100 s; a long tool-using turn can be
+        # silent that long, so the server ticks every 25 s. The page ignores it.
+        while True:
+            await asyncio.sleep(KEEPALIVE_SECONDS)
+            try:
+                await ws.send_text(json.dumps({"type": "tick"}))
+            except Exception:
+                return
+    ticker = asyncio.create_task(_keepalive())
     try:
         while True:
             msg = await ws.receive()
@@ -336,13 +392,32 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
                 await ws.send_text(json.dumps({"type": "ready", "session": session}))
             elif kind == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
+            elif kind == "resend":
+                # "I could not hear that": the last reply goes out as a Telegram voice note, same audio.
+                if not FALLBACK.configured():
+                    await ws.send_text(json.dumps({"type": "error", "text": "no Telegram fallback configured"}))
+                elif not turn or not turn.reply.strip():
+                    await ws.send_text(json.dumps({"type": "status", "text": "nothing to resend yet"}))
+                else:
+                    try:
+                        how = await turn.forward("You asked for this reply again.")
+                        await ws.send_text(json.dumps({"type": "status", "text": f"sent to Telegram as {'a voice note' if how == 'voice' else 'text'}"}))
+                    except Exception as e:  # noqa: BLE001
+                        await ws.send_text(json.dumps({"type": "error", "text": f"Telegram resend failed: {str(e)[:200]}"}))
     except WebSocketDisconnect:
         pass
     finally:
-        if turn:
-            turn.cancelled = True
-        if current and not current.done():
-            current.cancel()
+        ticker.cancel()
+        if current and not current.done() and FALLBACK.configured() and turn and not turn.cancelled:
+            # Let the turn finish detached: its reply reaches the person as a voice note.
+            turn.lost = True
+            DETACHED.add(current)
+            current.add_done_callback(DETACHED.discard)
+        else:
+            if turn:
+                turn.cancelled = True
+            if current and not current.done():
+                current.cancel()
 
 
 def main() -> None:

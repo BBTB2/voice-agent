@@ -34,6 +34,7 @@
   <input type="text" id="typed" placeholder="or type a message and press Enter" disabled>
   <button class="secondary" id="stop">Stop</button>
   <button class="secondary" id="new">New chat</button>
+  <button class="secondary" id="resend" title="send the last reply to Telegram as a voice note" hidden>Send to Telegram</button>
 </div>
 <div id="log"></div>
 <div id="prov"></div>
@@ -50,7 +51,7 @@
     localStorage.setItem("voice_token", token);
     if (agent) agent.close();
     agent = new VoiceAgent({ url: location.origin, token, debug: false });
-    agent.on("ready", (m) => { line("s", `connected · profile ${m.profile} · stt ${m.stt.join(">")} · tts ${m.tts.join(">")} · brain ${m.brain || "none"}`); $("talk").disabled = false; $("typed").disabled = false; });
+    agent.on("ready", (m) => { line("s", `connected · profile ${m.profile} · stt ${m.stt.join(">")} · tts ${m.tts.join(">")} · brain ${m.brain || "none"}${m.fallback ? " · fallback " + m.fallback : ""}`); $("talk").disabled = false; $("typed").disabled = false; $("resend").hidden = !m.fallback; });
     agent.on("transcript", (m) => { if (m.text) line("u", "You: " + m.text); else line("s", "(heard nothing)"); current = null; });
     agent.on("token", (m) => { if (!current) current = line("a", ""); current.textContent += m.text; log.scrollTop = log.scrollHeight; });
     agent.on("sentence", (m) => { $("prov").textContent = `last voice: ${m.provider}`; });
@@ -63,6 +64,8 @@
     agent.connect();
   }
   $("connect").onclick = connect;
+  $("resend").onclick = () => { if (agent) { agent.resend(); line("s", "asking for the last reply as a Telegram voice note"); } };
+  document.addEventListener("pointerdown", () => { if (agent) agent.unlock(); }, { passive: true });
   const talk = $("talk");
   const down = (e) => { e.preventDefault(); if (!agent || talk.disabled) return; talk.classList.add("rec"); talk.textContent = "Listening… release to send"; agent.startRecording().catch((err) => line("e", "mic: " + err.message)); };
   const up = (e) => { e.preventDefault(); if (!agent) return; talk.classList.remove("rec"); talk.textContent = "Hold to talk"; agent.stopRecording(); };
