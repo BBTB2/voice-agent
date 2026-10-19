@@ -19,21 +19,27 @@
   .u { color:var(--acc); } .a { } .s { color:var(--mute); font-size:13px; } .e { color:var(--bad); }
   .msg { margin:6px 0; white-space:pre-wrap; }
   #prov { font-size:12px; color:var(--mute); margin-top:8px; }
+  #cam { width:100%; max-height:38vh; border-radius:12px; background:#000; display:none; object-fit:cover; margin:8px 0 0; }
+  #cam.on { display:block; }
+  button.cam.on { background:var(--ok); }
+  .v { color:var(--mute); font-size:14px; border-left:3px solid var(--acc); padding-left:8px; }
   a { color:var(--acc); }
 </style>
 </head>
 <body>
 <h1>Mahadeva voice</h1>
-<div class="sub">Hold the button, speak, release. The transcript goes to the brain; the reply is spoken sentence by sentence. <a href="/nhs/">NHS demo</a> · <a href="/nhs/reach.html">reachability test</a></div>
+<div class="sub">Hold the button, speak, release. The transcript goes to the brain; the reply is spoken sentence by sentence. With the camera on, the hold also records what the camera sees and one sharp still at release, so Mahadeva can answer about what is in front of you. <a href="/nhs/">NHS demo</a> · <a href="/nhs/reach.html">reachability test</a></div>
 <div class="row" id="auth">
   <input type="password" id="token" placeholder="service token" autocomplete="off">
   <button id="connect">Connect</button>
 </div>
+<video id="cam" playsinline muted autoplay></video>
 <button id="talk" disabled>Hold to talk</button>
 <div class="row">
   <input type="text" id="typed" placeholder="or type a message and press Enter" disabled>
   <button class="secondary" id="stop">Stop</button>
   <button class="secondary" id="new">New chat</button>
+  <button class="secondary cam" id="camera" title="point the camera at something and hold to talk" hidden>Camera</button>
   <button class="secondary" id="resend" title="send the last reply to Telegram as a voice note" hidden>Send to Telegram</button>
 </div>
 <div id="log"></div>
@@ -51,7 +57,11 @@
     localStorage.setItem("voice_token", token);
     if (agent) agent.close();
     agent = new VoiceAgent({ url: location.origin, token, debug: false });
-    agent.on("ready", (m) => { line("s", `connected · profile ${m.profile} · stt ${m.stt.join(">")} · tts ${m.tts.join(">")} · brain ${m.brain || "none"}${m.fallback ? " · fallback " + m.fallback : ""}`); $("talk").disabled = false; $("typed").disabled = false; $("resend").hidden = !m.fallback; });
+    agent.on("ready", (m) => { line("s", `connected · profile ${m.profile} · stt ${m.stt.join(">")} · tts ${m.tts.join(">")} · brain ${m.brain || "none"}${m.fallback ? " · fallback " + m.fallback : ""}${m.camera ? " · eyes " + ((m.vision || []).join(">") || "none") : ""}`); $("talk").disabled = false; $("typed").disabled = false; $("resend").hidden = !m.fallback; $("camera").hidden = !(m.camera && (m.vision || []).length); if (m.camera && localStorage.getItem("voice_camera") === "1" && !agent.cameraOn) cameraOn(); });
+    agent.on("vision", (m) => { if (m.text) line("v", `Seen (${m.provider}${m.used ? ", " + m.used : ""}${m.note ? "; " + m.note : ""}): ${m.text}`); else line("e", "Could not see: " + (m.note || "no picture")); });
+    agent.on("still", (m) => { $("prov").textContent = `still ${m.width}x${m.height}, ${(m.bytes/1024).toFixed(0)} KB sent`; });
+    agent.on("clip", (m) => { $("prov").textContent += ` · clip ${(m.bytes/1024).toFixed(0)} KB sending`; });
+    agent.on("camera", (m) => { $("cam").classList.toggle("on", m.on); $("camera").classList.toggle("on", m.on); $("camera").textContent = m.on ? "Camera on" : "Camera"; $("talk").textContent = m.on ? "Hold to talk (camera on)" : "Hold to talk"; });
     agent.on("transcript", (m) => { if (m.text) line("u", "You: " + m.text); else line("s", "(heard nothing)"); current = null; });
     agent.on("token", (m) => { if (!current) current = line("a", ""); current.textContent += m.text; log.scrollTop = log.scrollHeight; });
     agent.on("sentence", (m) => { $("prov").textContent = `last voice: ${m.provider}`; });
@@ -68,11 +78,13 @@
   document.addEventListener("pointerdown", () => { if (agent) agent.unlock(); }, { passive: true });
   const talk = $("talk");
   const down = (e) => { e.preventDefault(); if (!agent || talk.disabled) return; talk.classList.add("rec"); talk.textContent = "Listening… release to send"; agent.startRecording().catch((err) => line("e", "mic: " + err.message)); };
-  const up = (e) => { e.preventDefault(); if (!agent) return; talk.classList.remove("rec"); talk.textContent = "Hold to talk"; agent.stopRecording(); };
+  const up = (e) => { e.preventDefault(); if (!agent) return; talk.classList.remove("rec"); talk.textContent = agent.cameraOn ? "Hold to talk (camera on)" : "Hold to talk"; agent.stopRecording(); };
   talk.addEventListener("pointerdown", down); talk.addEventListener("pointerup", up); talk.addEventListener("pointercancel", up); talk.addEventListener("pointerleave", (e) => { if (talk.classList.contains("rec")) up(e); });
   talk.addEventListener("keydown", (e) => { if (e.code === "Space" && !e.repeat) down(e); }); talk.addEventListener("keyup", (e) => { if (e.code === "Space") up(e); });
   $("typed").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.value.trim()) { agent.sendText(e.target.value.trim()); e.target.value = ""; } });
   $("stop").onclick = () => agent && agent.cancel();
+  function cameraOn() { agent.enableCamera({ preview: $("cam") }).then(() => localStorage.setItem("voice_camera", "1"), (err) => line("e", "camera: " + err.message)); }
+  $("camera").onclick = () => { if (!agent) return; if (agent.cameraOn) { agent.disableCamera(); localStorage.setItem("voice_camera", "0"); } else cameraOn(); };
   $("new").onclick = () => { if (agent) { agent.reset(); log.innerHTML = ""; } };
   if ($("token").value) connect();
 })();

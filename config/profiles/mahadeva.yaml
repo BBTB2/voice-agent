@@ -5,3 +5,4 @@ brain:
 legs:
   stt: [openai, azure, google, gemini, local]
   tts: [openai, azure, google, gemini, local]
+  vision: [gemini, openai]

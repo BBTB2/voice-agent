@@ -1,4 +1,4 @@
-from .base import Provider, ProviderError, STTResult, TTSResult
+from .base import Provider, ProviderError, STTResult, TTSResult, VisionRequest, VisionResult
 
 REGISTRY: dict[str, type[Provider]] = {}
 
@@ -27,4 +27,4 @@ def build_providers(cfg: dict) -> dict[str, Provider]:
     return out
 
 
-__all__ = ["Provider", "ProviderError", "STTResult", "TTSResult", "REGISTRY", "build_providers"]
+__all__ = ["Provider", "ProviderError", "STTResult", "TTSResult", "VisionRequest", "VisionResult", "REGISTRY", "build_providers"]

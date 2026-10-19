@@ -22,9 +22,19 @@ brain:
   first_turn_prefix: "You are being spoken to through a voice interface. Answer in short spoken sentences, no markdown, no lists; summarise instead of quoting files."
   send_history: false                       # the bridge keeps history itself (prompt_cache_key); set true for stateless brains
   min_sentence_chars: 24
+  send_still: true                          # camera turns: the release still goes to the brain as an image part too (stage 10)
+
+camera:                                     # stage 10, Mahadeva's eyes: hold-to-talk records the camera as well
+  enabled: true                             # false = the page hides the camera switch and the service ignores media
+  clip_max_seconds: 8                       # the last N seconds of the hold are kept (Rock: ~5 s clips, cap ~8)
+  clip_wait_seconds: 12                     # after the words arrive, how long to wait for the clip before answering from the still
+  clip_max_width: 960                       # clip is re-encoded this wide at 4 fps (vision models sample ~1 fps)
+  still_max_bytes: 6000000
+  clip_max_bytes: 40000000
 
 waterfall:
   timeout_seconds: 8                        # per paid provider call (decision 4a)
+  vision_timeout_seconds: 60                # a clip read is slower than speech; accuracy over speed (stage 10)
   local_timeout_seconds: 60                 # the CPU floor is slow but free
   cooldown_minutes: 15
   default_monthly_budget_usd: 10
@@ -36,6 +46,7 @@ providers:
     tts_model: gpt-4o-mini-tts
     voice: coral
     tts_instructions: "Speak clearly and briskly, British English."
+    vision_model: ${OPENAI_VISION_MODEL:-gpt-4o-mini}   # stills-only fallback for the camera leg
     budget_usd: 10
   azure:
     key: ${AZURE_SPEECH_KEY}
@@ -55,6 +66,7 @@ providers:
     api_key: ${GEMINI_API_KEY}
     stt_model: ${GEMINI_STT_MODEL:-gemini-3.8-flash}
     tts_model: ${GEMINI_TTS_MODEL:-gemini-2.5-flash-preview-tts}
+    vision_model: ${GEMINI_VISION_MODEL:-gemini-3.8-flash}   # reads the clip natively; first choice for the camera leg
     voice: Kore
     budget_usd: 10
   local:
@@ -68,3 +80,4 @@ providers:
 legs:                                       # order = waterfall order; local last = the free floor
   stt: [openai, azure, google, gemini, local]
   tts: [openai, azure, google, gemini, local]
+  vision: [gemini, openai]                  # camera leg: Gemini sees the clip; OpenAI gets stills only (no free floor)

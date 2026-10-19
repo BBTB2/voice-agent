@@ -21,7 +21,9 @@ from .audio import AudioError, to_wav16k, wav_duration_seconds
 from .brain import Brain, BrainError, SentenceSplitter, speakable
 from .config import HERE, load_config
 from .fallback import TelegramVoiceNote
-from .providers import build_providers
+from .providers import VisionRequest, build_providers
+from .video import VideoError, clip_frames, normalise_clip
+from .vision import brain_text
 from .waterfall import Exhausted, Waterfall
 
 logging.basicConfig(level=os.environ.get("VOICE_LOG", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -38,6 +40,16 @@ MAX_SECONDS = float(SERVICE.get("max_utterance_seconds", 60))
 # embed voice.js). Comma-separated, scheme included. Requests without an Origin header (curl, scripts)
 # are judged by the token alone.
 ALLOWED_ORIGINS = {o.strip().rstrip("/").lower() for o in str(SERVICE.get("allowed_origins") or "").split(",") if o.strip()}
+# Stage 10, the camera leg: hold-to-talk also records the phone camera; a clip and a release still go to a
+# vision model whose description (and the still) reach the brain with the words. Nothing is kept after the turn.
+CAMERA = CFG.get("camera") or {}
+CAMERA_ENABLED = bool(CAMERA.get("enabled", True))
+CLIP_MAX_SECONDS = float(CAMERA.get("clip_max_seconds", 8))
+CLIP_WAIT_SECONDS = float(CAMERA.get("clip_wait_seconds", 12))
+CLIP_MAX_WIDTH = int(CAMERA.get("clip_max_width", 960))
+STILL_MAX_BYTES = int(CAMERA.get("still_max_bytes", 6_000_000))
+CLIP_MAX_BYTES = int(CAMERA.get("clip_max_bytes", 40_000_000))
+SEND_STILL = bool((CFG.get("brain") or {}).get("send_still", True))
 PROVIDERS = build_providers(CFG)
 WF = Waterfall(CFG, PROVIDERS, DATA_DIR)
 BRAIN = Brain(CFG.get("brain") or {})
@@ -96,7 +108,8 @@ async def _shutdown() -> None:
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True, "version": __version__, "profile": SERVICE.get("profile"),
-            "brain": BRAIN.configured(), "stt": WF.candidates("stt"), "tts": WF.candidates("tts")}
+            "brain": BRAIN.configured(), "stt": WF.candidates("stt"), "tts": WF.candidates("tts"),
+            "vision": WF.candidates("vision") if CAMERA_ENABLED else [], "camera": CAMERA_ENABLED}
 
 
 @app.get("/")
@@ -125,6 +138,8 @@ async def status(token: str | None = Query(None), authorization: str | None = He
     _require(token, authorization)
     return {"version": __version__, "profile": SERVICE.get("profile"), "language": LANGUAGE,
             "brain": {"url": BRAIN.url, "model": BRAIN.model, "configured": BRAIN.configured()},
+            "camera": {"enabled": CAMERA_ENABLED, "clip_max_seconds": CLIP_MAX_SECONDS, "clip_wait_seconds": CLIP_WAIT_SECONDS,
+                       "send_still": SEND_STILL},
             "waterfall": WF.status()}
 
 
@@ -227,10 +242,11 @@ async def _tts(text: str, only: str | None = None, on_fallthrough=None):
 class Turn:
     """One utterance: STT -> brain stream -> sentence TTS, with audio sent as it is ready."""
 
-    def __init__(self, ws: WebSocket, session: str, history: list[dict]):
+    def __init__(self, ws: WebSocket, session: str, history: list[dict], media: dict | None = None):
         self.ws = ws
         self.session = session
         self.history = history
+        self.media = media                     # camera turn: still, clip buffer and the clip_done event (see new_media)
         self.cancelled = False
         self.lost = False                      # the browser went away mid-reply
         self.reply = ""
@@ -254,6 +270,7 @@ class Turn:
 
     async def run(self, audio: bytes | None, typed: str | None) -> None:
         t0 = time.monotonic()
+        camera = self.media is not None
         try:
             if typed is not None:
                 text, stt_name = typed.strip(), "typed"
@@ -262,24 +279,33 @@ class Turn:
                 secs = wav_duration_seconds(wav)
                 if secs > MAX_SECONDS:
                     raise AudioError(f"utterance too long ({secs:.0f} s > {MAX_SECONDS:.0f} s)")
-                if secs < 0.25:
+                if secs < 0.25 and not camera:
                     await self.send(type="transcript", text="", provider="none", note="too short")
                     await self.send(type="done", turn_ms=0)
                     return
-                stt_name, res = await _stt(wav, await self.fallthrough("stt"))
-                text = res.text
+                if secs < 0.25:
+                    text, stt_name = "", "none"          # a silent hold with the camera on still means "look at this"
+                else:
+                    stt_name, res = await _stt(wav, await self.fallthrough("stt"))
+                    text = res.text
             await self.send(type="transcript", text=text, provider=stt_name, ms=int((time.monotonic() - t0) * 1000))
-            if not text:
+            if not text and not camera:
                 await self.send(type="done", turn_ms=int((time.monotonic() - t0) * 1000))
                 return
             if not BRAIN.configured():
                 raise BrainError("no brain configured")
+            images: list[tuple[str, bytes]] = []
+            if camera:
+                text, images = await self._look(text)
+                if self.cancelled:
+                    await self.send(type="done", turn_ms=int((time.monotonic() - t0) * 1000))
+                    return
             splitter = SentenceSplitter(int((CFG.get("brain") or {}).get("min_sentence_chars", 24)))
             tts_queue: asyncio.Queue[str | None] = asyncio.Queue()
             speaker = asyncio.create_task(self._speak(tts_queue))
             reply = ""
             try:
-                async for delta in BRAIN.stream(self.session, text, self.history, first_turn=not self.history):
+                async for delta in BRAIN.stream(self.session, text, self.history, first_turn=not self.history, images=images):
                     if self.cancelled:
                         break
                     reply += delta
@@ -302,6 +328,54 @@ class Turn:
             LOG.warning("turn failed: %s", e)
             await self.send(type="error", text=str(e)[:400])
             await self.send(type="done", turn_ms=int((time.monotonic() - t0) * 1000))
+
+    async def _look(self, question: str) -> tuple[str, list[tuple[str, bytes]]]:
+        """Camera turn: wait briefly for the clip, describe clip + still through the vision waterfall, and return
+        the text the brain gets (words + description) plus the still as an image part. Degrades in order:
+        clip+still -> still only (clip late or unreadable) -> "could not see" (nothing usable arrived)."""
+        m = self.media or {}
+        t0 = time.monotonic()
+        if m.get("clip_state") == "pending":
+            await self.send(type="status", text="waiting for the clip")
+            try:
+                await asyncio.wait_for(m["clip_done"].wait(), CLIP_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                LOG.info("clip did not finish within %.0f s (%d bytes so far); answering from the still", CLIP_WAIT_SECONDS, len(m.get("clip") or b""))
+        still: bytes | None = bytes(m["still"]) if m.get("still") else None
+        clip: bytes | None = bytes(m["clip"]) if m.get("clip_state") == "done" and m.get("clip") else None
+        clip_mime = m.get("clip_mime") or "video/mp4"
+        note = None
+        if clip:
+            try:
+                clip, clip_mime = await normalise_clip(clip, clip_mime, CLIP_MAX_SECONDS, CLIP_MAX_WIDTH)
+            except VideoError as e:
+                LOG.warning("clip unusable (%s); still only", e)
+                clip, note = None, "the clip was unreadable"
+        elif m.get("clip_state") == "pending":
+            note = "the clip did not arrive in time"
+        if not still and not clip:
+            await self.send(type="vision", provider="none", text="", used="", note=note or "no picture arrived",
+                            ms=int((time.monotonic() - t0) * 1000))
+            return brain_text(question, None, None, note or "no picture arrived"), []
+        req = VisionRequest(question=question, still=still, clip=clip, clip_mime=clip_mime, language=LANGUAGE)
+        await self.send(type="status", text="looking" + (" (clip and still)" if clip and still else " (still only)" if still else " (clip only)"))
+
+        async def _call(p):
+            if getattr(p, "vision_stills_only", False) and req.clip and req.frames is None:
+                req.frames = await clip_frames(req.clip, req.clip_mime)
+            return await p.describe(req)
+        try:
+            name, res = await WF.run("vision", _call, await self.fallthrough("vision"))
+        except Exhausted as e:
+            LOG.warning("vision exhausted: %s", e)
+            await self.send(type="vision", provider="none", text="", used="", note="no vision provider could look",
+                            ms=int((time.monotonic() - t0) * 1000))
+            return brain_text(question, None, None, "the vision step failed, so nothing was seen"), []
+        WF.record(name, usd=res.usd, looks=1)
+        await self.send(type="vision", provider=name, text=res.text, used=res.used, note=note, usd=res.usd,
+                        ms=int((time.monotonic() - t0) * 1000))
+        images = [(m.get("still_mime") or "image/jpeg", still)] if still and SEND_STILL else []
+        return brain_text(question, res.text, name, note), images
 
     async def forward(self, note: str = "") -> str:
         """Send this turn's reply to Telegram as a voice note (the same audio the page would have played)."""
@@ -345,8 +419,14 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
     chunks: list[bytes] = []
     current: asyncio.Task | None = None
     turn: Turn | None = None
+    # Camera mode (stage 10): once the page says {"type":"camera","on":true}, every binary frame starts with a tag
+    # byte: 1 = audio chunk, 2 = clip chunk, 3 = the still. Without it binary frames are bare audio (0.2.x widgets).
+    tagged = False
+    media = new_media()
     await ws.send_text(json.dumps({"type": "ready", "session": session, "profile": SERVICE.get("profile"),
                                    "stt": WF.candidates("stt"), "tts": WF.candidates("tts"),
+                                   "vision": WF.candidates("vision") if CAMERA_ENABLED else [],
+                                   "camera": CAMERA_ENABLED,
                                    "brain": BRAIN.model if BRAIN.configured() else None,
                                    "fallback": "telegram" if FALLBACK.configured() else None}))
     async def _keepalive() -> None:
@@ -365,7 +445,19 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
             if msg.get("type") == "websocket.disconnect":
                 break
             if msg.get("bytes") is not None:
-                chunks.append(msg["bytes"])
+                b = msg["bytes"]
+                if not tagged or not b:
+                    chunks.append(b)
+                elif b[0] == 1:
+                    chunks.append(b[1:])
+                elif b[0] == 2:
+                    if media["clip_state"] == "pending" and len(media["clip"]) + len(b) <= CLIP_MAX_BYTES:
+                        media["clip"] += b[1:]
+                elif b[0] == 3:
+                    if media["taken"]:
+                        media = new_media()
+                    if len(b) - 1 <= STILL_MAX_BYTES:
+                        media["still"] = b[1:]
                 continue
             try:
                 data = json.loads(msg.get("text") or "{}")
@@ -377,6 +469,29 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
                     turn.cancelled = True
                 chunks = []
                 await ws.send_text(json.dumps({"type": "cancelled"}))
+            elif kind == "camera":
+                tagged = bool(data.get("on"))
+                if not CAMERA_ENABLED and tagged:
+                    await ws.send_text(json.dumps({"type": "error", "text": "the camera is switched off in this deployment"}))
+            elif kind == "clip_begin":
+                if media["taken"] or media["clip_state"] != "none":
+                    media = new_media()
+                media["clip_state"] = "pending"
+                media["clip_mime"] = str(data.get("mime") or "video/mp4")
+            elif kind == "clip_end":
+                if media["clip_state"] == "pending":
+                    media["clip_state"] = "done"
+                    media["clip_done"].set()
+            elif kind == "still":
+                if media["taken"]:
+                    media = new_media()
+                try:
+                    raw = base64.b64decode(data.get("b64") or "")
+                except ValueError:
+                    raw = b""
+                if raw and len(raw) <= STILL_MAX_BYTES:
+                    media["still"] = raw
+                    media["still_mime"] = str(data.get("mime") or "image/jpeg")
             elif kind in ("utterance_end", "text"):
                 if current and not current.done():
                     await ws.send_text(json.dumps({"type": "error", "text": "still answering the last turn"}))
@@ -384,7 +499,13 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
                     continue
                 audio = b"".join(chunks) if kind == "utterance_end" else None
                 chunks = []
-                turn = Turn(ws, session, history)
+                use_media = None
+                if CAMERA_ENABLED and data.get("camera"):
+                    media["taken"] = True
+                    if data.get("clip") == "none" and media["clip_state"] == "pending":
+                        media["clip_state"] = "none"
+                    use_media = media
+                turn = Turn(ws, session, history, media=use_media)
                 current = asyncio.create_task(turn.run(audio, data.get("text") if kind == "text" else None))
             elif kind == "reset":
                 history.clear()
@@ -418,6 +539,12 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
                 turn.cancelled = True
             if current and not current.done():
                 current.cancel()
+
+
+def new_media() -> dict:
+    """Per-hold camera buffers. ``taken`` = a turn owns it; late clip chunks for that turn still land here."""
+    return {"still": None, "still_mime": "image/jpeg", "clip": bytearray(), "clip_mime": None,
+            "clip_state": "none", "clip_done": asyncio.Event(), "taken": False}
 
 
 def main() -> None:

@@ -3,7 +3,11 @@
  *   <script src="https://voice.example/voice.js"></script>
  *   const agent = new VoiceAgent({url: "https://voice.example", token: "..."}); agent.connect();
  *   agent.on("transcript", m => ...); agent.startRecording(); agent.stopRecording();
- * Needs a secure context (https or localhost) for the microphone. */
+ * Camera (stage 10, "eyes"): agent.enableCamera({preview: videoEl}) keeps the back camera live in the preview;
+ * every hold then also records a clip and takes one full-resolution still at release. The still goes first,
+ * then the words, then the clip, so a weak signal degrades to still-only instead of failing. The service
+ * sends a "vision" event with the description before the reply. agent.disableCamera() stops the camera.
+ * Needs a secure context (https or localhost) for the microphone and the camera. */
 (function (global) {
   class VoiceAgent {
     constructor(opts) {
@@ -20,7 +24,11 @@
       this.ctx = null;
       this.unlocked = false;
       this.current = null;
+      this.camStream = null;          // live camera (video track only; the microphone is taken per hold as before)
+      this.preview = null;
+      this.clipChunks = [];
     }
+    get cameraOn() { return !!this.camStream; }
     on(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); return this; }
     emit(type, msg) { (this.handlers[type] || []).forEach((f) => { try { f(msg); } catch (e) { console.error(e); } }); }
     connect() {
@@ -31,7 +39,7 @@
       if (this.session) u.searchParams.set("session", this.session);
       const ws = new WebSocket(u.toString());
       ws.binaryType = "arraybuffer";
-      ws.onopen = () => { this.retries = 0; this.emit("open", {}); };
+      ws.onopen = () => { this.retries = 0; if (this.cameraOn) this.send({ type: "camera", on: true }); this.emit("open", {}); };
       ws.onclose = (e) => { this.emit("close", { code: e.code }); this.maybeReconnect(e.code); };
       ws.onerror = () => this.emit("error", { text: "websocket error" });
       ws.onmessage = (e) => {
@@ -70,6 +78,11 @@
     reset() { this.stopPlayback(); this.send({ type: "reset" }); }
     /** "I could not hear that": the service sends the last reply to the person's Telegram as a voice note. */
     resend() { this.send({ type: "resend" }); }
+    /** Binary frame with a tag byte in front (camera mode): 1 audio, 2 clip, 3 still. */
+    sendTagged(tag, buf) {
+      const ws = this.ws; if (!ws || ws.readyState !== 1) return;
+      const out = new Uint8Array(buf.byteLength + 1); out[0] = tag; out.set(new Uint8Array(buf), 1); ws.send(out.buffer);
+    }
     async startRecording() {
       if (this.rec) return;
       this.unlock();
@@ -79,18 +92,93 @@
       const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"].find((t) => global.MediaRecorder && MediaRecorder.isTypeSupported(t));
       const rec = new MediaRecorder(this.stream, mime ? { mimeType: mime } : undefined);
       const ws = this.ws;
-      rec.ondataavailable = (e) => { if (e.data && e.data.size && ws && ws.readyState === 1) e.data.arrayBuffer().then((b) => ws.send(b)); };
+      const camera = this.cameraOn;
+      rec.ondataavailable = (e) => {
+        if (!(e.data && e.data.size && ws && ws.readyState === 1)) return;
+        e.data.arrayBuffer().then((b) => { if (camera) this.sendTagged(1, b); else ws.send(b); });
+      };
       rec.onstop = () => {
-        // ondataavailable for the final chunk fires before onstop; give its arrayBuffer() a tick.
-        setTimeout(() => this.send({ type: "utterance_end" }), 60);
+        // ondataavailable for the final chunk fires before onstop; give its arrayBuffer() a tick. In camera mode
+        // the still must be on the wire first, then the words, then the clip (weak links get the still at least).
+        const finish = () => {
+          this.send(camera ? { type: "utterance_end", camera: true, clip: this.clipRec ? "pending" : "none" } : { type: "utterance_end" });
+          this.utteranceSent = true;
+          this.flushClip();
+        };
+        setTimeout(() => { (this.stillPromise || Promise.resolve()).then(finish, finish); }, 60);
         if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
         this.rec = null;
       };
+      if (camera) this.startClip();
       rec.start(250);
       this.rec = rec;
-      this.emit("recording", { mime: rec.mimeType });
+      this.emit("recording", { mime: rec.mimeType, camera });
     }
-    stopRecording() { if (this.ctx && this.ctx.state !== "running") this.ctx.resume().catch(() => {}); if (this.rec && this.rec.state !== "inactive") this.rec.stop(); }
+    stopRecording() {
+      if (this.ctx && this.ctx.state !== "running") this.ctx.resume().catch(() => {});
+      if (this.cameraOn && this.rec && this.rec.state !== "inactive") this.stillPromise = this.takeStill();
+      if (this.rec && this.rec.state !== "inactive") this.rec.stop();
+      if (this.clipRec && this.clipRec.state !== "inactive") this.clipRec.stop();
+    }
+    /* ---- camera (stage 10) ---- */
+    async enableCamera(opts) {
+      opts = opts || {};
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("camera needs https or localhost");
+      if (this.camStream) return this.camStream;
+      const video = { facingMode: opts.facing || "environment", width: { ideal: opts.width || 1920 }, height: { ideal: opts.height || 1080 } };
+      this.camStream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      this.preview = opts.preview || this.preview || null;
+      if (!this.preview && global.document) { this.preview = document.createElement("video"); this.preview.style.display = "none"; document.body.appendChild(this.preview); }
+      this.preview.setAttribute("playsinline", ""); this.preview.muted = true; this.preview.srcObject = this.camStream;
+      this.preview.play().catch(() => {});
+      this.send({ type: "camera", on: true });
+      this.emit("camera", { on: true, settings: this.camStream.getVideoTracks()[0].getSettings() });
+      return this.camStream;
+    }
+    disableCamera() {
+      if (this.camStream) { this.camStream.getTracks().forEach((t) => t.stop()); this.camStream = null; }
+      if (this.preview) this.preview.srcObject = null;
+      this.send({ type: "camera", on: false });
+      this.emit("camera", { on: false });
+    }
+    startClip() {
+      if (!this.camStream || !global.MediaRecorder) { this.clipRec = null; return; }
+      const mime = ["video/mp4", "video/webm;codecs=vp8", "video/webm;codecs=vp9", "video/webm"].find((t) => MediaRecorder.isTypeSupported(t));
+      let rec;
+      try { rec = new MediaRecorder(new MediaStream(this.camStream.getVideoTracks()), Object.assign({ videoBitsPerSecond: 1500000 }, mime ? { mimeType: mime } : {})); }
+      catch (e) { this.emit("error", { text: "clip recorder: " + e.message }); this.clipRec = null; return; }
+      this.clipChunks = []; this.clipDone = false; this.utteranceSent = false;
+      rec.ondataavailable = (e) => { if (e.data && e.data.size) this.clipChunks.push(e.data); };
+      rec.onstop = () => { this.clipDone = true; this.flushClip(); };
+      this.send({ type: "clip_begin", mime: rec.mimeType || mime || "video/mp4" });
+      rec.start(500);
+      this.clipRec = rec;
+    }
+    /** Send the buffered clip once both the words are on the wire and the recorder has stopped. */
+    flushClip() {
+      if (!this.clipRec || !this.clipDone || !this.utteranceSent) return;
+      const chunks = this.clipChunks; this.clipChunks = []; this.clipRec = null;
+      const total = chunks.reduce((n, c) => n + c.size, 0);
+      this.emit("clip", { bytes: total });
+      let p = Promise.resolve();
+      chunks.forEach((c) => { p = p.then(() => c.arrayBuffer()).then((b) => this.sendTagged(2, b)); });
+      p.then(() => this.send({ type: "clip_end" }));
+    }
+    /** One full-resolution JPEG from the live camera, sent as a tagged binary frame. */
+    takeStill() {
+      return new Promise((resolve) => {
+        try {
+          const v = this.preview;
+          if (!v || !v.videoWidth) return resolve(false);
+          const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight;
+          c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+          c.toBlob((blob) => {
+            if (!blob) return resolve(false);
+            blob.arrayBuffer().then((b) => { this.sendTagged(3, b); this.emit("still", { bytes: b.byteLength, width: c.width, height: c.height }); resolve(true); }, () => resolve(false));
+          }, "image/jpeg", 0.85);
+        } catch (e) { resolve(false); }
+      });
+    }
     /* Playback goes through Web Audio. Safari (and iOS, and Chrome's autoplay policy) refuse sound that
      * starts outside a user gesture; an AudioContext created and resumed inside a tap stays unlocked,
      * so call unlock() from the hold-to-talk pointerdown or the Connect click. */

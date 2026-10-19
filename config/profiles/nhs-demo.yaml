@@ -15,3 +15,6 @@ providers:
 legs:
   stt: [azure, local]
   tts: [azure, local]
+  vision: []                  # no camera in the NHS demo (Azure-only profile)
+camera:
+  enabled: false

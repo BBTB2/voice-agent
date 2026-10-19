@@ -69,9 +69,27 @@ Client → server: binary frames = audio chunks of one utterance (any container 
 mp4, ogg, wav); then `{"type":"utterance_end"}`. Or `{"type":"text","text":"..."}` to skip the
 microphone. `{"type":"cancel"}`, `{"type":"reset"}` (new brain session), `{"type":"ping"}`.
 
-Server → client: `ready{session, profile, stt[], tts[], brain}` · `transcript{text, provider, ms}` ·
+Server → client: `ready{session, profile, stt[], tts[], vision[], camera, brain}` · `transcript{text, provider, ms}` ·
 `token{text}` (brain deltas) · `sentence{text, provider, seq}` then `audio{seq, mime, b64}` ·
 `status{text}` (a waterfall fall-through, shown to the user) · `error{text}` · `done{turn_ms, reply}`.
+
+### Camera (stage 10, "eyes")
+
+With the camera switched on in the page (`agent.enableCamera({preview})` in the widget), every hold also records the
+back camera. Order on release: the still (tag 3) first, then `utterance_end{camera:true, clip:"pending"|"none"}`,
+then the clip chunks and `clip_end`, so a weak link degrades to still-only instead of failing. Once the page sends
+`{"type":"camera","on":true}` every binary frame carries a tag byte: 1 audio chunk, 2 clip chunk, 3 the still (JPEG);
+`{"type":"clip_begin","mime"}` opens a clip, `{"type":"still","mime","b64"}` is the JSON form of tag 3. A typed turn
+can carry `camera:true` too. The service waits `camera.clip_wait_seconds` (12) for the clip, keeps its last
+`camera.clip_max_seconds` (8) re-encoded small (`voice_agent/video.py`, ffmpeg, nothing kept on disk), and runs the
+**vision leg** of the waterfall: `gemini` reads clip + still natively, `openai` (fallback) gets the still plus three
+frames pulled from the clip. The description goes to the brain inside the user turn as
+`[Camera, live, described by gemini: ...]` (`voice_agent/vision.py`) and, with `brain.send_still` (default true),
+the still rides along as an OpenAI `image_url` data part; the Hermes bridge forwards it as an ACP image block so the
+agent can look again itself. The page gets `vision{provider, text, used, note, usd, ms}` before the reply.
+The model is told to say what it cannot read or see rather than guess, and the brain is told to pass that on.
+Cost: a 5 s clip + still is roughly 3-4k Gemini input tokens, well under a penny a question at Oct 2026 list prices;
+`usage.json` counts `looks` per provider under the same monthly cap. `camera.enabled: false` hides it all (nhs-demo).
 
 ## Delivery fallback (Telegram voice note)
 
@@ -95,11 +113,11 @@ Estimated cost per conversation minute (30 s speech each way): OpenAI ~$0.01, Az
 
 ## Providers
 
-- **openai**: `gpt-4o-mini-transcribe` + `gpt-4o-mini-tts` (mp3). Env `OPENAI_API_KEY`.
+- **openai**: `gpt-4o-mini-transcribe` + `gpt-4o-mini-tts` (mp3); vision fallback `gpt-4o-mini` (`OPENAI_VISION_MODEL`). Env `OPENAI_API_KEY`.
 - **azure**: Azure AI Speech REST, short-audio STT (≤60 s utterances) + neural TTS, works with an
   AIServices multi-service key. Env `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`.
 - **gemini**: Gemini API (AI Studio key): audio understanding as STT, Gemini TTS (PCM → WAV). Env
-  `GEMINI_API_KEY`; models overridable with `GEMINI_STT_MODEL`, `GEMINI_TTS_MODEL`.
+  `GEMINI_API_KEY`; models overridable with `GEMINI_STT_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_VISION_MODEL` (the camera leg's first choice; it reads the clip as video).
 - **google**: Google Cloud Speech-to-Text v1 (sync recognize, `latest_short`, LINEAR16) + Text-to-Speech v1
   (`en-GB-Neural2-B`, mp3). Needs a Cloud project with both APIs enabled and billing on. Credential is
   either `GOOGLE_SPEECH_API_KEY` (API key restricted to the two APIs) or `GOOGLE_SPEECH_CREDENTIALS_B64`
@@ -120,4 +138,5 @@ line in `providers/__init__.py`, one block in the YAML.
 ## Tests
 
 `pytest voice/tests` runs offline with fake providers (waterfall, budgets, breaker, WS loop, sentence
-splitting). On asgard, `tests/stage6/run.sh` probes the real providers and the bridge.
+splitting, the camera leg with ffmpeg-made clips). On asgard, `tests/stage6/run.sh` probes the real providers and
+the bridge; `tests/stage10/run.sh` sends a synthetic clip and still through the real vision leg.

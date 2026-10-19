@@ -33,10 +33,32 @@ class TTSResult:
     usd: float
 
 
+@dataclass
+class VisionRequest:
+    """What the camera saw during one hold-to-talk, plus the words. Stills and clips are raw bytes."""
+    question: str
+    still: bytes | None = None          # one full-resolution frame taken at release (JPEG)
+    still_mime: str = "image/jpeg"
+    clip: bytes | None = None           # the hold, trimmed (video/mp4 after normalise_clip)
+    clip_mime: str = "video/mp4"
+    frames: list[bytes] | None = None   # JPEG frames pulled from the clip, for stills-only models
+    language: str = "en-GB"
+
+
+@dataclass
+class VisionResult:
+    text: str               # the model's description, or its honest "cannot see" when the picture is too poor
+    usd: float
+    tokens_in: int = 0
+    tokens_out: int = 0
+    used: str = ""          # "clip+still", "still", "frames"
+
+
 class Provider:
     name = "base"
     supports_stt = True
     supports_tts = True
+    supports_vision = False     # describe() implemented (the camera leg, stage 10)
     # list prices used ONLY for the budget estimate (USD); verified 16 Oct 2026, see voice/README.md
     stt_usd_per_minute = 0.0
     tts_usd_per_1k_chars = 0.0
@@ -51,6 +73,9 @@ class Provider:
         raise NotImplementedError
 
     async def synthesize(self, text: str, language: str) -> TTSResult:
+        raise NotImplementedError
+
+    async def describe(self, req: VisionRequest) -> VisionResult:
         raise NotImplementedError
 
     async def close(self) -> None:
