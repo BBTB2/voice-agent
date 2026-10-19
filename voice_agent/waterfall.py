@@ -38,13 +38,15 @@ class Usage:
             provider, {"usd": 0.0, "calls": 0, "stt_seconds": 0.0, "tts_chars": 0, "failures": 0})
 
     def add(self, provider: str, *, usd: float = 0.0, stt_seconds: float = 0.0, tts_chars: int = 0,
-            failure: bool = False) -> None:
+            failure: bool = False, looks: int = 0) -> None:
         r = self.row(provider)
         r["usd"] = round(r["usd"] + usd, 6)
         r["calls"] += 0 if failure else 1
         r["stt_seconds"] = round(r["stt_seconds"] + stt_seconds, 2)
         r["tts_chars"] += tts_chars
         r["failures"] += 1 if failure else 0
+        if looks:
+            r["looks"] = int(r.get("looks", 0)) + looks     # camera descriptions (stage 10)
         self._save()
 
     def spent(self, provider: str) -> float:
@@ -108,6 +110,8 @@ class Waterfall:
         wf = cfg.get("waterfall") or {}
         self.timeout = float(wf.get("timeout_seconds", 8))
         self.local_timeout = float(wf.get("local_timeout_seconds", 60))
+        # A leg may need longer than the 8 s speech budget: a clip upload plus a video read takes 10-30 s.
+        self.leg_timeouts = {k[:-16]: float(v) for k, v in wf.items() if k.endswith("_timeout_seconds") and k not in ("local_timeout_seconds",)}
         self.default_budget = float(wf.get("default_monthly_budget_usd", 10))
         self.breaker = Breaker(float(wf.get("cooldown_minutes", 15)) * 60)
         self.usage = Usage(data_dir / "usage.json")
@@ -157,7 +161,7 @@ class Waterfall:
                 tried.append((name, why))
                 continue
             p = self.providers[name]
-            timeout = self.local_timeout if name == "local" else self.timeout
+            timeout = self.local_timeout if name == "local" else self.leg_timeouts.get(leg, self.timeout)
             t0 = time.monotonic()
             try:
                 if name in self.forced_failures:
@@ -188,8 +192,8 @@ class Waterfall:
         self.breaker.trip(name, reason, retryable)
         self.usage.add(name, failure=True)
 
-    def record(self, name: str, *, usd: float, stt_seconds: float = 0.0, tts_chars: int = 0) -> None:
-        self.usage.add(name, usd=usd, stt_seconds=stt_seconds, tts_chars=tts_chars)
+    def record(self, name: str, *, usd: float, stt_seconds: float = 0.0, tts_chars: int = 0, looks: int = 0) -> None:
+        self.usage.add(name, usd=usd, stt_seconds=stt_seconds, tts_chars=tts_chars, looks=looks)
 
     # -- reporting ----------------------------------------------------------------------------
     def status(self) -> dict:

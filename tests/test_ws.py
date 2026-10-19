@@ -32,7 +32,10 @@ def brain_server():
     async def chat(req: Request):
         body = await req.json()
         seen.append(body)
-        text = body["messages"][-1]["content"].split("\n")[-1]
+        content = body["messages"][-1]["content"]
+        if isinstance(content, list):                       # stage 10: text part + image parts
+            content = "\n".join(p["text"] for p in content if p.get("type") == "text")
+        text = content.split("\n")[-1]
 
         async def gen():
             for piece in [f"You said {text}. ", "**Second** sentence here. ", "Bye."]:

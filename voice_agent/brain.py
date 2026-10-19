@@ -38,8 +38,11 @@ class Brain:
         return bool(self.url)
 
     async def stream(self, session: str, user_text: str, history: list[dict] | None = None,
-                     first_turn: bool = False) -> AsyncIterator[str]:
-        """Yield assistant text deltas (reasoning and tool lines are dropped)."""
+                     first_turn: bool = False, images: list[tuple[str, bytes]] | None = None) -> AsyncIterator[str]:
+        """Yield assistant text deltas (reasoning and tool lines are dropped).
+
+        ``images`` (mime, bytes) ride along as OpenAI ``image_url`` data parts: the Hermes bridge forwards them
+        to the agent as ACP image blocks (stage 10), other brains see them natively or ignore them."""
         text = user_text
         if first_turn and self.first_turn_prefix:
             text = f"{self.first_turn_prefix.strip()}\n\n{user_text}"
@@ -48,7 +51,14 @@ class Brain:
             messages.append({"role": "system", "content": self.system_prompt})
         if self.send_history and history:
             messages.extend(history)
-        messages.append({"role": "user", "content": text})
+        if images:
+            import base64
+            content: list[dict] = [{"type": "text", "text": text}]
+            for mime, data in images:
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode()}"}})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": text})
         body = {"model": self.model, "stream": True, "prompt_cache_key": session, "messages": messages}
         headers = {"Content-Type": "application/json"}
         if self.key:
