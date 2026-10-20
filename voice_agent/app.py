@@ -468,13 +468,17 @@ class Turn:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: str | None = Query(None)) -> None:
+    # Accept first, then close with our own code: a close before accept reaches the browser as a bare HTTP 403
+    # (close code 1006), and the widget could not tell "wrong token" from "network blip" and would keep retrying.
     app_ = _app_for(token)
     if app_ is None:
-        await ws.close(code=4401)
+        await ws.accept()
+        await ws.close(code=4401, reason="bad or missing token")
         return
     if not _origin_ok(ws.headers.get("origin"), ws.headers.get("host"), app_):
         LOG.warning("ws refused: origin %s not allowed for app %s", ws.headers.get("origin"), app_.name)
-        await ws.close(code=4403)
+        await ws.accept()
+        await ws.close(code=4403, reason="origin not allowed for this app")
         return
     await ws.accept()
     session = session or f"voice-{uuid.uuid4().hex[:12]}"
