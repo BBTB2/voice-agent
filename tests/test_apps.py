@@ -141,9 +141,9 @@ def test_origin_per_app(app):
     assert ok("https://voice.surajmenon.ai", "voice.surajmenon.ai", snarky)         # own host always
     c = TestClient(app.app)
     from starlette.websockets import WebSocketDisconnect
-    with pytest.raises(WebSocketDisconnect) as e:
-        with c.websocket_connect("/ws?token=secret", headers={"origin": "https://www.prof-snarky.com", "host": "voice.surajmenon.ai"}):
-            pass
+    with c.websocket_connect("/ws?token=secret", headers={"origin": "https://www.prof-snarky.com", "host": "voice.surajmenon.ai"}) as ws:
+        with pytest.raises(WebSocketDisconnect) as e:
+            ws.receive_text()
     assert e.value.code == 4403
     with c.websocket_connect("/ws?token=snarky-token", headers={"origin": "https://www.prof-snarky.com", "host": "voice.surajmenon.ai"}) as ws:
         ready = json.loads(ws.receive_text())

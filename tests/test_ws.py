@@ -101,9 +101,9 @@ def test_healthz_and_auth(app):
 def test_ws_turn_with_fallthrough(app, brain_server):
     c = TestClient(app.app)
     from starlette.websockets import WebSocketDisconnect
-    with pytest.raises(WebSocketDisconnect) as e:
-        with c.websocket_connect("/ws?token=wrong"):
-            pass
+    with c.websocket_connect("/ws?token=wrong") as ws:          # accepted, then closed with our code (0.4.0)
+        with pytest.raises(WebSocketDisconnect) as e:
+            ws.receive_text()
     assert e.value.code == 4401
     with c.websocket_connect("/ws?token=secret") as ws:
         ready = json.loads(ws.receive_text())
