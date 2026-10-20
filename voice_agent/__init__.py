@@ -2,4 +2,4 @@
 
 Cascade: browser audio -> STT (waterfall) -> any OpenAI-compatible chat endpoint -> TTS (waterfall) -> browser.
 """
-__version__ = "0.3.0"
+__version__ = "0.4.0"

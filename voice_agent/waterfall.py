@@ -52,6 +52,16 @@ class Usage:
     def spent(self, provider: str) -> float:
         return float(self.data.get(month_key(), {}).get(provider, {}).get("usd", 0.0))
 
+    # Stage 9: the same spend counted once more per app (row "app:<name>"), so a site has its own monthly cap.
+    def add_app(self, app: str, usd: float) -> None:
+        r = self.row(f"app:{app}")
+        r["usd"] = round(r["usd"] + usd, 6)
+        r["calls"] += 1
+        self._save()
+
+    def app_spent(self, app: str) -> float:
+        return self.spent(f"app:{app}")
+
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,12 +142,14 @@ class Waterfall:
         b = self.budget(name)
         return b is not None and self.usage.spent(name) >= b
 
-    def skip_reason(self, name: str, leg: str) -> str | None:
+    def skip_reason(self, name: str, leg: str, free_only: bool = False) -> str | None:
         p = self.providers.get(name)
         if p is None:
             return "not built"
         if not p.configured():
             return "no key"
+        if free_only and self.budget(name) is not None:
+            return "app budget reached"
         if not getattr(p, f"supports_{leg}", True):
             return f"no {leg}"
         if self.over_budget(name):
@@ -146,17 +158,23 @@ class Waterfall:
             return f"{self.breaker.state(name)}: {self.breaker.reason.get(name, '')}"
         return None
 
-    def candidates(self, leg: str) -> list[str]:
-        return [n for n in self.legs.get(leg, []) if self.skip_reason(n, leg) is None]
+    def candidates(self, leg: str, free_only: bool = False) -> list[str]:
+        return [n for n in self.legs.get(leg, []) if self.skip_reason(n, leg, free_only) is None]
+
+    def app_over_budget(self, app: str | None, budget: float | None) -> bool:
+        """An app past its monthly cap gets the free floor only (stage 9)."""
+        return bool(app) and budget is not None and self.usage.app_spent(app) >= budget
 
     # -- run ----------------------------------------------------------------------------------
     async def run(self, leg: str, call: Callable[[Provider], Awaitable[Any]],
-                  on_fallthrough: Callable[[str, str, str | None], Awaitable[None]] | None = None) -> tuple[str, Any]:
-        """Try each provider of the leg in order; returns (provider_name, result)."""
+                  on_fallthrough: Callable[[str, str, str | None], Awaitable[None]] | None = None,
+                  free_only: bool = False) -> tuple[str, Any]:
+        """Try each provider of the leg in order; returns (provider_name, result). ``free_only`` (an app over its
+        monthly cap) skips every provider that has a budget, i.e. everything but the local floor."""
         tried: list[tuple[str, str]] = []
         order = self.legs.get(leg, [])
         for name in order:
-            why = self.skip_reason(name, leg)
+            why = self.skip_reason(name, leg, free_only)
             if why:
                 tried.append((name, why))
                 continue
@@ -182,7 +200,7 @@ class Waterfall:
                 LOG.info("%s via %s in %.0f ms", leg, name, (time.monotonic() - t0) * 1000)
                 return name, result
             tried.append((name, reason))
-            nxt = next((n for n in order[order.index(name) + 1:] if self.skip_reason(n, leg) is None), None)
+            nxt = next((n for n in order[order.index(name) + 1:] if self.skip_reason(n, leg, free_only) is None), None)
             LOG.warning("%s: %s failed (%s); next: %s", leg, name, reason, nxt)
             if on_fallthrough:
                 await on_fallthrough(name, reason, nxt)
@@ -192,14 +210,19 @@ class Waterfall:
         self.breaker.trip(name, reason, retryable)
         self.usage.add(name, failure=True)
 
-    def record(self, name: str, *, usd: float, stt_seconds: float = 0.0, tts_chars: int = 0, looks: int = 0) -> None:
+    def record(self, name: str, *, usd: float, stt_seconds: float = 0.0, tts_chars: int = 0, looks: int = 0,
+               app: str | None = None) -> None:
         self.usage.add(name, usd=usd, stt_seconds=stt_seconds, tts_chars=tts_chars, looks=looks)
+        if app and usd:
+            self.usage.add_app(app, usd)
 
     # -- reporting ----------------------------------------------------------------------------
     def status(self) -> dict:
         out: dict[str, Any] = {"month": month_key(), "legs": {}, "providers": {}}
         for leg, order in self.legs.items():
             out["legs"][leg] = {"order": order, "active": self.candidates(leg), "last_used": self.last_used.get(leg)}
+        out["apps"] = {k[4:]: {"spent_usd": v.get("usd", 0.0), "calls": v.get("calls", 0)}
+                       for k, v in self.usage.data.get(month_key(), {}).items() if k.startswith("app:")}
         for name, p in self.providers.items():
             out["providers"][name] = {
                 "configured": p.configured(),

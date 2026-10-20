@@ -3,6 +3,11 @@
  *   <script src="https://voice.example/voice.js"></script>
  *   const agent = new VoiceAgent({url: "https://voice.example", token: "..."}); agent.connect();
  *   agent.on("transcript", m => ...); agent.startRecording(); agent.stopRecording();
+ * Apps (stage 9): the token picks the app on the service side (brain, origins, caps). When the app's brain is
+ * somebody's site that needs the signed-in person's own credential (prof-snarky: the Clerk session token), pass
+ * `auth: async () => token`; the widget attaches it to every turn and answers the service's "auth_request" with a
+ * fresh one. `persona` (string, optional) rides along with each turn for brains that take one. The service sends a
+ * "meta" event after the words (citations, chat id, credits) and "error" with kind "auth" when the brain refused the person.
  * Camera (stage 10, "eyes"): agent.enableCamera({preview: videoEl}) keeps the back camera live in the preview;
  * every hold then also records a clip and takes one full-resolution still at release. The still goes first,
  * then the words, then the clip, so a weak signal degrades to still-only instead of failing. The service
@@ -14,6 +19,8 @@
       this.url = (opts.url || location.origin).replace(/\/$/, "");
       this.token = opts.token || "";
       this.session = opts.session || null;
+      this.auth = typeof opts.auth === "function" ? opts.auth : null;   // async () => the person's credential for the brain
+      this.persona = opts.persona || null;
       this.debug = !!opts.debug;
       this.handlers = {};
       this.ws = null;
@@ -46,7 +53,8 @@
         let m; try { m = JSON.parse(e.data); } catch (_) { return; }
         if (m.type === "tick") return;              // server keepalive
         if (this.debug) console.log("voice <", m.type, m);
-        if (m.type === "ready") this.session = m.session;
+        if (m.type === "ready") { this.session = m.session; this.app = m.app; this.needsAuth = !!m.needs_auth; }
+        if (m.type === "auth_request") { this.sendAuth(); return; }
         if (m.type === "sentence") this.lastProvider = m.provider;
         if (m.type === "audio") this.enqueue(m);
         this.emit(m.type, m);
@@ -73,7 +81,20 @@
       }, wait);
     }
     send(obj) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(obj)); }
-    sendText(text) { this.unlock(); this.stopPlayback(); this.send({ type: "text", text }); }
+    /** Fetch the person's credential (if an auth callback was given) and send it on its own. */
+    sendAuth() {
+      if (!this.auth) return Promise.resolve(null);
+      return Promise.resolve().then(() => this.auth()).then((t) => { this.send({ type: "auth", token: t || "" }); return t; },
+        (e) => { this.emit("error", { text: "auth: " + (e && e.message || e), kind: "auth" }); return null; });
+    }
+    /** The turn-ending message with the credential and persona attached (both optional). */
+    sendTurn(msg) {
+      if (this.persona) msg.persona = this.persona;
+      const go = (t) => { if (t) msg.auth = t; this.send(msg); };
+      if (!this.auth) return go(null);
+      Promise.resolve().then(() => this.auth()).then(go, () => go(null));
+    }
+    sendText(text) { this.unlock(); this.stopPlayback(); this.sendTurn({ type: "text", text }); }
     cancel() { this.stopPlayback(); this.send({ type: "cancel" }); }
     reset() { this.stopPlayback(); this.send({ type: "reset" }); }
     /** "I could not hear that": the service sends the last reply to the person's Telegram as a voice note. */
@@ -101,7 +122,7 @@
         // ondataavailable for the final chunk fires before onstop; give its arrayBuffer() a tick. In camera mode
         // the still must be on the wire first, then the words, then the clip (weak links get the still at least).
         const finish = () => {
-          this.send(camera ? { type: "utterance_end", camera: true, clip: this.clipRec ? "pending" : "none" } : { type: "utterance_end" });
+          this.sendTurn(camera ? { type: "utterance_end", camera: true, clip: this.clipRec ? "pending" : "none" } : { type: "utterance_end" });
           this.utteranceSent = true;
           this.flushClip();
         };

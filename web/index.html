@@ -57,7 +57,7 @@
     localStorage.setItem("voice_token", token);
     if (agent) agent.close();
     agent = new VoiceAgent({ url: location.origin, token, debug: false });
-    agent.on("ready", (m) => { line("s", `connected · profile ${m.profile} · stt ${m.stt.join(">")} · tts ${m.tts.join(">")} · brain ${m.brain || "none"}${m.fallback ? " · fallback " + m.fallback : ""}${m.camera ? " · eyes " + ((m.vision || []).join(">") || "none") : ""}`); $("talk").disabled = false; $("typed").disabled = false; $("resend").hidden = !m.fallback; $("camera").hidden = !(m.camera && (m.vision || []).length); if (m.camera && localStorage.getItem("voice_camera") === "1" && !agent.cameraOn) cameraOn(); });
+    agent.on("ready", (m) => { line("s", `connected · profile ${m.profile}${m.app && m.app !== m.profile ? " · app " + m.app : ""} · stt ${m.stt.join(">")} · tts ${m.tts.join(">")} · brain ${m.brain || "none"}${m.fallback ? " · fallback " + m.fallback : ""}${m.camera ? " · eyes " + ((m.vision || []).join(">") || "none") : ""}`); $("talk").disabled = false; $("typed").disabled = false; $("resend").hidden = !m.fallback; $("camera").hidden = !(m.camera && (m.vision || []).length); if (m.camera && localStorage.getItem("voice_camera") === "1" && !agent.cameraOn) cameraOn(); });
     agent.on("vision", (m) => { if (m.text) line("v", `Seen (${m.provider}${m.used ? ", " + m.used : ""}${m.note ? "; " + m.note : ""}): ${m.text}`); else line("e", "Could not see: " + (m.note || "no picture")); });
     agent.on("still", (m) => { $("prov").textContent = `still ${m.width}x${m.height}, ${(m.bytes/1024).toFixed(0)} KB sent`; });
     agent.on("clip", (m) => { $("prov").textContent += ` · clip ${(m.bytes/1024).toFixed(0)} KB sending`; });

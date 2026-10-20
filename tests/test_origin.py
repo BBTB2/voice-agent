@@ -32,9 +32,11 @@ def test_origin_rules(app_mod):
 def test_ws_refuses_foreign_origin(app_mod):
     from fastapi.testclient import TestClient
     client = TestClient(app_mod.app)
-    with pytest.raises(Exception):
-        with client.websocket_connect("/ws?token=t0k", headers={"origin": "https://evil.example", "host": "voice.surajmenon.ai"}) as ws:
+    from starlette.websockets import WebSocketDisconnect
+    with client.websocket_connect("/ws?token=t0k", headers={"origin": "https://evil.example", "host": "voice.surajmenon.ai"}) as ws:
+        with pytest.raises(WebSocketDisconnect) as e:
             ws.receive_json()
+    assert e.value.code == 4403
     with client.websocket_connect("/ws?token=t0k", headers={"origin": "https://radread.co.uk", "host": "voice.surajmenon.ai"}) as ws:
         msg = ws.receive_json()
         assert msg.get("type") == "ready"

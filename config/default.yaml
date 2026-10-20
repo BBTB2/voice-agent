@@ -8,12 +8,15 @@ service:
   language: en-GB
   max_utterance_seconds: 60
   allowed_origins: "${VOICE_ALLOWED_ORIGINS:-}"   # sites that embed voice.js, e.g. "https://radread.co.uk,https://sitewright.uk"; own host always allowed
+  budget_usd: ${VOICE_BUDGET_USD:-}             # optional monthly paid-speech cap for the default app (per-provider caps still apply)
+  auth_wait_seconds: 4                        # how long a turn waits for the page's fresh credential (brains that need one)
 
 fallback:                                   # when the browser loses the reply, send it as a Telegram voice note
   telegram_bot_token: "${VOICE_TELEGRAM_BOT_TOKEN:-}"   # the same bot the Hermes gateway uses; empty = no fallback
   telegram_chat_id: "${VOICE_TELEGRAM_CHAT_ID:-}"       # the person's Telegram user id
 
-brain:
+brain:                                      # the default app's brain (kind openai = any OpenAI-compatible /v1)
+  kind: openai
   url: ${BRAIN_URL}                         # any OpenAI-compatible /v1 base, e.g. http://jarvis-hermes-bridge:8077/v1
   api_key: ${BRAIN_API_KEY}
   model: ${BRAIN_MODEL:-mahadeva}
@@ -23,6 +26,25 @@ brain:
   send_history: false                       # the bridge keeps history itself (prompt_cache_key); set true for stateless brains
   min_sentence_chars: 24
   send_still: true                          # camera turns: the release still goes to the brain as an image part too (stage 10)
+
+# Stage 9: several apps behind one container. The token a page connects with picks its app: brain, browser origins,
+# camera, Telegram fallback and a monthly paid-speech cap of its own (past it the free local floor answers, never a
+# refusal). An app whose token variable is empty is not loaded, so this block is inert until the token exists.
+apps:
+  prof-snarky:                              # www.prof-snarky.com (BBTB2/prof-snarky): Clerk sign-in, 1 credit a question
+    tokens: ["${VOICE_TOKEN_PROF_SNARKY}"]
+    allowed_origins: "${PROF_SNARKY_ORIGINS:-https://www.prof-snarky.com,https://prof-snarky.com}"
+    budget_usd: ${PROF_SNARKY_BUDGET_USD:-10}
+    camera: false
+    fallback: false
+    brain:
+      kind: prof-snarky
+      url: "${PROF_SNARKY_URL:-https://www.prof-snarky.com/api/query}"
+      persona: ""                           # empty = the person's default professor on the site; the page may send one per turn
+      mode: quick
+      timeout_seconds: 130                  # the route itself allows the worker 120 s
+      speak_similar: true                   # a stored similar answer is spoken (free) instead of re-asking
+      say_sources: true                     # "N sources are listed in the chat" after the answer
 
 camera:                                     # stage 10, Mahadeva's eyes: hold-to-talk records the camera as well
   enabled: true                             # false = the page hides the camera switch and the service ignores media

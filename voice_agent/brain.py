@@ -23,7 +23,48 @@ class BrainError(Exception):
     pass
 
 
-class Brain:
+class BrainAuthError(BrainError):
+    """The brain refused the person, not the service: no sign-in, no credits, rate limit. Spoken as-is."""
+
+
+class BaseBrain:
+    """What the voice loop needs from any brain (stage 9: several kinds behind one container).
+
+    ``stream`` yields speakable text deltas; ``meta`` (a dict the caller owns) collects whatever the brain wants
+    the page to have beside the words (citations, chat ids, credits). ``auth`` is the signed-in person's own
+    credential when the brain is somebody's app (prof-snarky: the Clerk session token); the OpenAI-compatible
+    brain ignores it and uses the service key."""
+    kind = "base"
+    needs_auth = False          # True = the page must supply the person's credential for every turn
+    label = ""
+
+    def configured(self) -> bool:
+        return False
+
+    async def stream(self, session: str, user_text: str, history: list[dict] | None = None,
+                     first_turn: bool = False, images: list[tuple[str, bytes]] | None = None,
+                     auth: str | None = None, meta: dict | None = None) -> AsyncIterator[str]:
+        raise NotImplementedError
+        yield ""  # pragma: no cover
+
+    async def close(self) -> None:
+        return None
+
+
+def make_brain(cfg: dict) -> "BaseBrain":
+    """``brain.kind``: ``openai`` (default, any /v1/chat/completions) or ``prof-snarky`` (its /api/query)."""
+    kind = str((cfg or {}).get("kind") or "openai").lower()
+    if kind in ("openai", "openai-compatible", "bridge"):
+        return Brain(cfg or {})
+    if kind in ("prof-snarky", "prof_snarky", "profsnarky"):
+        from .brains.prof_snarky import ProfSnarkyBrain
+        return ProfSnarkyBrain(cfg or {})
+    raise ValueError(f"unknown brain kind {kind!r}")
+
+
+class Brain(BaseBrain):
+    kind = "openai"
+
     def __init__(self, cfg: dict):
         self.url = (cfg.get("url") or "").rstrip("/")
         self.key = cfg.get("api_key") or ""
@@ -32,14 +73,16 @@ class Brain:
         self.system_prompt = cfg.get("system_prompt") or ""
         self.first_turn_prefix = cfg.get("first_turn_prefix") or ""
         self.send_history = bool(cfg.get("send_history", False))
+        self.label = self.model
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=10.0))
 
     def configured(self) -> bool:
         return bool(self.url)
 
     async def stream(self, session: str, user_text: str, history: list[dict] | None = None,
-                     first_turn: bool = False, images: list[tuple[str, bytes]] | None = None) -> AsyncIterator[str]:
-        """Yield assistant text deltas (reasoning and tool lines are dropped).
+                     first_turn: bool = False, images: list[tuple[str, bytes]] | None = None,
+                     auth: str | None = None, meta: dict | None = None) -> AsyncIterator[str]:
+        """Yield assistant text deltas (reasoning and tool lines are dropped). ``auth`` and ``meta`` are unused here.
 
         ``images`` (mime, bytes) ride along as OpenAI ``image_url`` data parts: the Hermes bridge forwards them
         to the agent as ACP image blocks (stage 10), other brains see them natively or ignore them."""
