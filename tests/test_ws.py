@@ -55,6 +55,7 @@ def brain_server():
         time.sleep(0.05)
     yield seen
     server.should_exit = True
+    t.join(10)          # free the port before the next module's copy of this fixture binds it
 
 
 @pytest.fixture()

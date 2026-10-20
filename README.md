@@ -13,7 +13,15 @@ D23 and D26 in shambho-jarvis. Nothing here imports from any other project.
 
 ## Use it in another project
 
-Two ways, pick one per project:
+Three ways, pick one per project:
+
+- **Join the running container as an app** (stage 9, 20 Oct 2026; what prof-snarky does): one voice container on
+  asgard serves several sites. Each app has its own token, browser origins, brain, camera/fallback switches and a
+  monthly paid-speech cap (`apps:` in `config/default.yaml`; the app loads only when its token variable is set).
+  The site embeds `voice.js` with its token; the token picks the app. Brains: `kind: openai` (any OpenAI-compatible
+  `/v1`) or `kind: prof-snarky` (`voice_agent/brains/prof_snarky.py`: the site's own `/api/query`, called with the
+  signed-in person's Clerk session token, which the page passes as `auth: async () => token`; credits, sign-in and
+  history stay the site's). Adding a brain kind = one file in `voice_agent/brains/` and one line in `make_brain`.
 
 - **Run the container** beside your app and point it at your brain: `docker build -t voice-agent .` then the
   `docker run` line below with `BRAIN_URL` = any OpenAI-compatible `/v1` base, and drop
@@ -59,9 +67,12 @@ Secrets only ever arrive as environment variables.
 | `POST /api/probe?providers=a,b` | each provider speaks a test phrase and must hear it back; pass/fail per provider |
 | `POST /api/reset?provider=` | clear a breaker |
 
-Auth: `?token=` or `Authorization: Bearer`. Tokens come from `service.tokens` (`${VOICE_TOKEN}`).
-Browser origins: the page's own host is always allowed; sites that embed `voice.js` go in `service.allowed_origins`
-(`VOICE_ALLOWED_ORIGINS=https://radread.co.uk,https://sitewright.uk`); any other browser origin gets WebSocket close 4403.
+Auth: `?token=` or `Authorization: Bearer`. Tokens come from `service.tokens` (`${VOICE_TOKEN}`, the default app) and
+from each `apps.<name>.tokens`; the token picks the app, and `/api/status` lists the apps (never their tokens) with
+spend and cap. Browser origins: the page's own host is always allowed; sites that embed `voice.js` go in
+`service.allowed_origins` (`VOICE_ALLOWED_ORIGINS=https://radread.co.uk,https://sitewright.uk`) for the default app
+and in `apps.<name>.allowed_origins` for an app; any other browser origin, or another app's origin with the wrong
+token, gets WebSocket close 4403.
 
 ### WebSocket protocol
 
@@ -69,9 +80,16 @@ Client → server: binary frames = audio chunks of one utterance (any container 
 mp4, ogg, wav); then `{"type":"utterance_end"}`. Or `{"type":"text","text":"..."}` to skip the
 microphone. `{"type":"cancel"}`, `{"type":"reset"}` (new brain session), `{"type":"ping"}`.
 
-Server → client: `ready{session, profile, stt[], tts[], vision[], camera, brain}` · `transcript{text, provider, ms}` ·
-`token{text}` (brain deltas) · `sentence{text, provider, seq}` then `audio{seq, mime, b64}` ·
-`status{text}` (a waterfall fall-through, shown to the user) · `error{text}` · `done{turn_ms, reply}`.
+Turn messages may carry `auth` (the person's credential for a brain that needs one) and `persona`; `{"type":"auth","token"}`
+updates the credential on its own, and the service sends `auth_request` just before asking such a brain (Clerk tokens
+live about a minute); the widget answers it from its `auth` callback.
+
+Server → client: `ready{session, profile, app, needs_auth, stt[], tts[], vision[], camera, brain, budget, fallback}` ·
+`transcript{text, provider, ms}` · `token{text}` (brain deltas) · `sentence{text, provider, seq}` then
+`audio{seq, mime, b64}` · `status{text}` (a waterfall fall-through, shown to the user) · `meta{...}` (what the brain
+wants the page to have beside the words: prof-snarky sends the raw markdown answer, citations, figures, chat id,
+credits used, persona, `similar`) · `error{text, kind?}` (`kind: "auth"` = the brain refused the person: not signed
+in, no credits; the refusal is also spoken) · `done{turn_ms, reply}`.
 
 ### Camera (stage 10, "eyes")
 
@@ -104,7 +122,8 @@ could not hear it. No extra synthesis: the clips are reused. Without a bot token
 
 Per leg, in config order. A provider is skipped when it has no key, is over its monthly budget
 (`budget_usd`, default $10; usage estimated from list prices and persisted in `/data/usage.json`), or is
-cooling (15 min after a 429, 5xx, timeout over 8 s, or any adapter error). A non-retryable failure (401,
+cooling (15 min after a 429, 5xx, timeout over 8 s, or any adapter error). Each app's spend is counted once more
+under `app:<name>`; an app past its own `budget_usd` gets the free local floor only until the month turns (stage 9). A non-retryable failure (401,
 400, missing model) parks the provider until restart or `/api/reset`. The local floor has no budget and
 a 60 s timeout. `VOICE_FAIL_PROVIDERS=openai,azure` forces failures for testing.
 
@@ -130,13 +149,21 @@ Estimated cost per conversation minute (30 s speech each way): OpenAI ~$0.01, Az
 Adding a provider = one file in `voice_agent/providers/` with `transcribe()` and `synthesize()`, one
 line in `providers/__init__.py`, one block in the YAML.
 
-## Profiles
+## Profiles and apps
 
 - `mahadeva`: all five providers, brain = `http://jarvis-hermes-bridge:8077/v1`.
 - `nhs-demo`: Azure then local only, EU/UK region, synthetic-cases banner, IG note. Decision 5b.
+- App `prof-snarky` (any profile, loaded when `VOICE_TOKEN_PROF_SNARKY` is set): brain `https://www.prof-snarky.com/api/query`
+  (`PROF_SNARKY_URL`), origins `PROF_SNARKY_ORIGINS` (default the two prof-snarky hosts), cap `PROF_SNARKY_BUDGET_USD`
+  (default $10), camera and Telegram fallback off. The site's page: `new VoiceAgent({url, token, persona,
+  auth: () => Clerk.session.getToken()})`; the answer is spoken without footnote marks, figure blocks or the Sources
+  footer, ends with "N sources are listed in the chat", a stored similar answer is replayed free and said so, and a
+  sign-in or credits refusal is spoken rather than failing. Speech costs the service about 1-2p a turn; the site charges
+  the person its usual credit.
 
 ## Tests
 
 `pytest voice/tests` runs offline with fake providers (waterfall, budgets, breaker, WS loop, sentence
-splitting, the camera leg with ffmpeg-made clips). On asgard, `tests/stage6/run.sh` probes the real providers and
+splitting, the camera leg with ffmpeg-made clips, and `test_apps.py`: a fake prof-snarky `/api/query`, the
+token-to-app map, per-app origins and caps, the credential hand-off, spoken refusals). On asgard, `tests/stage6/run.sh` probes the real providers and
 the bridge; `tests/stage10/run.sh` sends a synthetic clip and still through the real vision leg.
