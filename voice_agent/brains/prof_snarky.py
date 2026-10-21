@@ -5,7 +5,7 @@ prof-snarky (BBTB2/prof-snarky, www.prof-snarky.com) answers one question at a t
 Clerk sign-in, charging the signed-in person one credit (or a free search) a question. The voice service never
 holds a prof-snarky credential of its own: the page hands over the person's Clerk session token for each turn and
 this adapter forwards it as ``Authorization: Bearer``, so credits, the approval gate, the rate limits and the chat
-history stay exactly the site's. No history is sent: the site's pipeline is single-shot by design.
+history stay exactly the site's. No history is sent: the site keeps the conversation itself (threads, 21 Oct 2026); the page's thread id rides along as ``threadId`` and comes back in ``meta``.
 
 The answer comes back as markdown with ``[^N]`` footnotes, ``(Fig. F1)`` markers, ``![F1: ...](url)`` figure blocks
 and a ``**Sources:**`` footer; ``spoken_answer`` turns it into something a voice should say and ``meta`` carries the
@@ -23,6 +23,7 @@ import httpx
 from ..brain import BaseBrain, BrainAuthError, BrainError
 
 LOG = logging.getLogger("voice.brain.prof-snarky")
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 _FIG_BLOCK = re.compile(r"!\[F\d+(?::[^\]]*)?\]\([^)]*\)\s*\n?\*F\d+\.[^*]*\*\s*", re.S)
 _FIG_IMG = re.compile(r"!\[[^\]]*\]\([^)]*\)")
@@ -94,6 +95,15 @@ class ProfSnarkyBrain(BaseBrain):
         body: dict = {"query": query, "mode": self.mode, "force": False}
         if meta.get("persona") or self.persona:
             body["persona"] = meta.get("persona") or self.persona
+        thread_reset = False
+        tid = meta.get("thread_id")
+        if tid:
+            if isinstance(tid, str) and _UUID.match(tid):
+                body["threadId"] = tid
+            else:
+                LOG.info("dropping malformed thread_id")
+                meta.pop("thread_id", None)
+                thread_reset = True                  # the page shows its reset notice
         try:
             async with self._client() as client:
                 r = await client.post(self.url, json=body, headers={"Authorization": f"Bearer {auth}"})
@@ -101,6 +111,8 @@ class ProfSnarkyBrain(BaseBrain):
             raise BrainError(f"prof-snarky unreachable: {e}") from e
         if r.status_code in (301, 302, 303, 307, 308) or r.status_code == 401:
             raise BrainAuthError("prof-snarky did not accept your sign-in. Reload the page, sign in, and try again.")
+        if r.status_code == 400:
+            raise BrainAuthError("prof-snarky could not read that question. Tap New question and ask again.")
         if r.status_code == 402:
             raise BrainAuthError("You have no credits left on prof-snarky. Top up on the credits page and ask again.")
         if r.status_code == 429:
@@ -116,6 +128,7 @@ class ProfSnarkyBrain(BaseBrain):
             sim = data["similar"]
             meta.update({"similar": True, "chat_id": sim.get("id"), "answer": sim.get("answer", ""), "citations": sim.get("citations") or [],
                          "credits_used": 0, "persona": sim.get("persona"), "asked": sim.get("query")})
+            meta.pop("thread_id", None)    # a replay starts a new question; the page clears its thread
             if not self.speak_replay:
                 raise BrainError("prof-snarky offered a stored answer; replay is switched off")
             when = _when(sim.get("createdAt"))
@@ -127,7 +140,12 @@ class ProfSnarkyBrain(BaseBrain):
         meta.update({"similar": False, "chat_id": data.get("chatId"), "answer": answer, "citations": citations,
                      "figures": data.get("figures") or [], "credits_used": data.get("creditsUsed"),
                      "free_search_used": data.get("freeSearchUsed"), "persona": data.get("persona"),
-                     "archetype": data.get("archetype") or ""})
+                     "archetype": data.get("archetype") or "", "thread_reset": thread_reset or bool(data.get("threadReset")),
+                     "free_followups_left": data.get("freeFollowupsLeft")})
+        if data.get("threadId"):
+            meta["thread_id"] = data["threadId"]
+        else:
+            meta.pop("thread_id", None)
         spoken = spoken_answer(answer)
         if not spoken:
             raise BrainError("prof-snarky returned an empty answer")

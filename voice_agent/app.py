@@ -264,7 +264,8 @@ class Turn:
     """One utterance: STT -> brain stream -> sentence TTS, with audio sent as it is ready."""
 
     def __init__(self, ws: WebSocket, session: str, history: list[dict], media: dict | None = None,
-                 app: App | None = None, auth: dict | None = None, persona: str | None = None):
+                 app: App | None = None, auth: dict | None = None, persona: str | None = None,
+                 thread_id: str | None = None):
         self.ws = ws
         self.session = session
         self.history = history
@@ -272,6 +273,7 @@ class Turn:
         self.app = app or APPS.default         # stage 9: the app the token belongs to (brain, caps, camera, fallback)
         self.auth = auth if auth is not None else {"token": None, "event": asyncio.Event()}   # the person's own credential
         self.persona = persona                 # per-turn brain hint (prof-snarky: which professor)
+        self.thread_id = thread_id             # prof-snarky: the conversation to continue
         self.meta: dict = {}
         self.cancelled = False
         self.lost = False                      # the browser went away mid-reply
@@ -333,6 +335,8 @@ class Turn:
             reply = ""
             auth = await self._fresh_auth() if brain.needs_auth else None
             meta: dict = {"persona": self.persona} if self.persona else {}
+            if self.thread_id:
+                meta["thread_id"] = self.thread_id
             try:
                 async for delta in brain.stream(self.session, text, self.history, first_turn=not self.history, images=images,
                                                 auth=auth, meta=meta):
@@ -486,6 +490,7 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
     fallback_on = app_.fallback and FALLBACK.configured()
     auth: dict = {"token": None, "event": asyncio.Event()}     # the person's credential for brains that need one
     persona: str | None = None
+    thread_id: str | None = None
     history: list[dict] = []
     chunks: list[bytes] = []
     current: asyncio.Task | None = None
@@ -589,10 +594,13 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(None), session: s
                     auth["event"].set()
                 if data.get("persona") is not None:
                     persona = str(data.get("persona") or "") or None
-                turn = Turn(ws, session, history, media=use_media, app=app_, auth=auth, persona=persona)
+                if data.get("thread_id") is not None:
+                    thread_id = str(data.get("thread_id") or "") or None
+                turn = Turn(ws, session, history, media=use_media, app=app_, auth=auth, persona=persona, thread_id=thread_id)
                 current = asyncio.create_task(turn.run(audio, data.get("text") if kind == "text" else None))
             elif kind == "reset":
                 history.clear()
+                thread_id = None
                 session = f"voice-{uuid.uuid4().hex[:12]}"
                 await ws.send_text(json.dumps({"type": "ready", "session": session}))
             elif kind == "ping":
