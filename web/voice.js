@@ -6,7 +6,7 @@
  * Apps (stage 9): the token picks the app on the service side (brain, origins, caps). When the app's brain is
  * somebody's site that needs the signed-in person's own credential (prof-snarky: the Clerk session token), pass
  * `auth: async () => token`; the widget attaches it to every turn and answers the service's "auth_request" with a
- * fresh one. `persona` (string, optional) rides along with each turn for brains that take one. The service sends a
+ * fresh one. `persona` (string, optional) and `threadId` (string, optional; prof-snarky follow-up memory, read afresh on every turn, "" = new question) ride along with each turn for brains that take them. The service sends a
  * "meta" event after the words (citations, chat id, credits) and "error" with kind "auth" when the brain refused the person.
  * Camera (stage 10, "eyes"): agent.enableCamera({preview: videoEl}) keeps the back camera live in the preview;
  * every hold then also records a clip and takes one full-resolution still at release. The still goes first,
@@ -21,6 +21,7 @@
       this.session = opts.session || null;
       this.auth = typeof opts.auth === "function" ? opts.auth : null;   // async () => the person's credential for the brain
       this.persona = opts.persona || null;
+      this.threadId = opts.threadId || null;   // prof-snarky follow-up memory; "" sent = new question
       this.debug = !!opts.debug;
       this.handlers = {};
       this.ws = null;
@@ -90,6 +91,7 @@
     /** The turn-ending message with the credential and persona attached (both optional). */
     sendTurn(msg) {
       if (this.persona) msg.persona = this.persona;
+      msg.thread_id = this.threadId || "";
       const go = (t) => { if (t) msg.auth = t; this.send(msg); };
       if (!this.auth) return go(null);
       Promise.resolve().then(() => this.auth()).then(go, () => go(null));

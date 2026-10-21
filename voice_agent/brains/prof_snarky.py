@@ -5,7 +5,7 @@ prof-snarky (BBTB2/prof-snarky, www.prof-snarky.com) answers one question at a t
 Clerk sign-in, charging the signed-in person one credit (or a free search) a question. The voice service never
 holds a prof-snarky credential of its own: the page hands over the person's Clerk session token for each turn and
 this adapter forwards it as ``Authorization: Bearer``, so credits, the approval gate, the rate limits and the chat
-history stay exactly the site's. No history is sent: the site's pipeline is single-shot by design.
+history stay exactly the site's. No history is sent: the site keeps the conversation itself (threads, 21 Oct 2026); the page's thread id rides along as ``threadId`` and comes back in ``meta``.
 
 The answer comes back as markdown with ``[^N]`` footnotes, ``(Fig. F1)`` markers, ``![F1: ...](url)`` figure blocks
 and a ``**Sources:**`` footer; ``spoken_answer`` turns it into something a voice should say and ``meta`` carries the
@@ -94,6 +94,8 @@ class ProfSnarkyBrain(BaseBrain):
         body: dict = {"query": query, "mode": self.mode, "force": False}
         if meta.get("persona") or self.persona:
             body["persona"] = meta.get("persona") or self.persona
+        if meta.get("thread_id"):
+            body["threadId"] = meta["thread_id"]
         try:
             async with self._client() as client:
                 r = await client.post(self.url, json=body, headers={"Authorization": f"Bearer {auth}"})
@@ -116,6 +118,7 @@ class ProfSnarkyBrain(BaseBrain):
             sim = data["similar"]
             meta.update({"similar": True, "chat_id": sim.get("id"), "answer": sim.get("answer", ""), "citations": sim.get("citations") or [],
                          "credits_used": 0, "persona": sim.get("persona"), "asked": sim.get("query")})
+            meta.pop("thread_id", None)    # a replay starts a new question; the page clears its thread
             if not self.speak_replay:
                 raise BrainError("prof-snarky offered a stored answer; replay is switched off")
             when = _when(sim.get("createdAt"))
@@ -127,7 +130,12 @@ class ProfSnarkyBrain(BaseBrain):
         meta.update({"similar": False, "chat_id": data.get("chatId"), "answer": answer, "citations": citations,
                      "figures": data.get("figures") or [], "credits_used": data.get("creditsUsed"),
                      "free_search_used": data.get("freeSearchUsed"), "persona": data.get("persona"),
-                     "archetype": data.get("archetype") or ""})
+                     "archetype": data.get("archetype") or "", "thread_reset": bool(data.get("threadReset")),
+                     "free_followups_left": data.get("freeFollowupsLeft")})
+        if data.get("threadId"):
+            meta["thread_id"] = data["threadId"]
+        else:
+            meta.pop("thread_id", None)
         spoken = spoken_answer(answer)
         if not spoken:
             raise BrainError("prof-snarky returned an empty answer")

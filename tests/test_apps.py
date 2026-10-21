@@ -49,7 +49,8 @@ def snarky_server():
                                 "createdAt": "2026-09-01T10:00:00.000Z", "similarity": 0.93}, "creditsUsed": 0}
         return {"answer": ANSWER, "citations": [{"title": "Smith 2020", "url": "u1"}, {"title": "Jones 2021", "url": "u2"}],
                 "figures": [{"id": "f1"}], "creditsUsed": 1, "freeSearchUsed": False, "mode": "quick",
-                "persona": body.get("persona") or "snarky", "archetype": "", "chatId": "chat-new"}
+                "persona": body.get("persona") or "snarky", "archetype": "", "chatId": "chat-new",
+                "threadId": body.get("threadId") or "chat-new", "threadReset": False, "freeFollowupsLeft": None}
 
     cfg = uvicorn.Config(fake, host="127.0.0.1", port=18078, log_level="warning")
     server = uvicorn.Server(cfg)
@@ -177,6 +178,25 @@ def test_prof_snarky_turn_spoken_and_meta(app, snarky_server):
         assert "similar on 1 September" in sentences and "Old answer here" in sentences
         meta = next(e for e in events if e["type"] == "meta")
         assert meta["similar"] and meta["chat_id"] == "chat-old" and meta["credits_used"] == 0
+
+
+def test_prof_snarky_thread_rides_along(app, snarky_server):
+    c = TestClient(app.app)
+    with c.websocket_connect("/ws?token=snarky-token") as ws:
+        json.loads(ws.receive_text())
+        events = _turn(ws, {"type": "text", "text": "and in children?", "thread_id": "11111111-1111-1111-1111-111111111111"},
+                       auth_reply="clerk-jwt")
+        assert snarky_server[-1]["body"]["threadId"] == "11111111-1111-1111-1111-111111111111"
+        meta = next(e for e in events if e["type"] == "meta")
+        assert meta["thread_id"] == "11111111-1111-1111-1111-111111111111" and meta["thread_reset"] is False
+        # an empty thread_id ("New question") clears it for the next turn
+        _turn(ws, {"type": "text", "text": "a fresh question", "thread_id": ""}, auth_reply="clerk-jwt")
+        assert "threadId" not in snarky_server[-1]["body"]
+        # a similar replay is a new question: the page gets no thread back (it clears its own)
+        events = _turn(ws, {"type": "text", "text": "again please", "thread_id": "11111111-1111-1111-1111-111111111111"},
+                       auth_reply="clerk-jwt")
+        meta = next(e for e in events if e["type"] == "meta")
+        assert meta["similar"] and "thread_id" not in meta
 
 
 def test_prof_snarky_refusals_are_spoken(app, snarky_server):
