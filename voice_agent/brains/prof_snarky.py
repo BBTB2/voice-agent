@@ -23,6 +23,7 @@ import httpx
 from ..brain import BaseBrain, BrainAuthError, BrainError
 
 LOG = logging.getLogger("voice.brain.prof-snarky")
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 _FIG_BLOCK = re.compile(r"!\[F\d+(?::[^\]]*)?\]\([^)]*\)\s*\n?\*F\d+\.[^*]*\*\s*", re.S)
 _FIG_IMG = re.compile(r"!\[[^\]]*\]\([^)]*\)")
@@ -94,8 +95,15 @@ class ProfSnarkyBrain(BaseBrain):
         body: dict = {"query": query, "mode": self.mode, "force": False}
         if meta.get("persona") or self.persona:
             body["persona"] = meta.get("persona") or self.persona
-        if meta.get("thread_id"):
-            body["threadId"] = meta["thread_id"]
+        thread_reset = False
+        tid = meta.get("thread_id")
+        if tid:
+            if isinstance(tid, str) and _UUID.match(tid):
+                body["threadId"] = tid
+            else:
+                LOG.info("dropping malformed thread_id")
+                meta.pop("thread_id", None)
+                thread_reset = True                  # the page shows its reset notice
         try:
             async with self._client() as client:
                 r = await client.post(self.url, json=body, headers={"Authorization": f"Bearer {auth}"})
@@ -103,6 +111,8 @@ class ProfSnarkyBrain(BaseBrain):
             raise BrainError(f"prof-snarky unreachable: {e}") from e
         if r.status_code in (301, 302, 303, 307, 308) or r.status_code == 401:
             raise BrainAuthError("prof-snarky did not accept your sign-in. Reload the page, sign in, and try again.")
+        if r.status_code == 400:
+            raise BrainAuthError("prof-snarky could not read that question. Tap New question and ask again.")
         if r.status_code == 402:
             raise BrainAuthError("You have no credits left on prof-snarky. Top up on the credits page and ask again.")
         if r.status_code == 429:
@@ -130,7 +140,7 @@ class ProfSnarkyBrain(BaseBrain):
         meta.update({"similar": False, "chat_id": data.get("chatId"), "answer": answer, "citations": citations,
                      "figures": data.get("figures") or [], "credits_used": data.get("creditsUsed"),
                      "free_search_used": data.get("freeSearchUsed"), "persona": data.get("persona"),
-                     "archetype": data.get("archetype") or "", "thread_reset": bool(data.get("threadReset")),
+                     "archetype": data.get("archetype") or "", "thread_reset": thread_reset or bool(data.get("threadReset")),
                      "free_followups_left": data.get("freeFollowupsLeft")})
         if data.get("threadId"):
             meta["thread_id"] = data["threadId"]

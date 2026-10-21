@@ -6,7 +6,9 @@
  * Apps (stage 9): the token picks the app on the service side (brain, origins, caps). When the app's brain is
  * somebody's site that needs the signed-in person's own credential (prof-snarky: the Clerk session token), pass
  * `auth: async () => token`; the widget attaches it to every turn and answers the service's "auth_request" with a
- * fresh one. `persona` (string, optional) and `threadId` (string, optional; prof-snarky follow-up memory, read afresh on every turn, "" = new question) ride along with each turn for brains that take them. The service sends a
+ * fresh one. `persona` (string, optional) and `threadId` (string, optional) ride along with each turn for brains that
+ * take them. threadId is prof-snarky's follow-up memory, read afresh on every turn ("" = new question): the service
+ * echoes `thread_id` in meta and the host sets `agent.threadId` from it to continue. The service sends a
  * "meta" event after the words (citations, chat id, credits) and "error" with kind "auth" when the brain refused the person.
  * Camera (stage 10, "eyes"): agent.enableCamera({preview: videoEl}) keeps the back camera live in the preview;
  * every hold then also records a clip and takes one full-resolution still at release. The still goes first,
@@ -98,7 +100,7 @@
     }
     sendText(text) { this.unlock(); this.stopPlayback(); this.sendTurn({ type: "text", text }); }
     cancel() { this.stopPlayback(); this.send({ type: "cancel" }); }
-    reset() { this.stopPlayback(); this.send({ type: "reset" }); }
+    reset() { this.stopPlayback(); this.threadId = null; this.send({ type: "reset" }); }
     /** "I could not hear that": the service sends the last reply to the person's Telegram as a voice note. */
     resend() { this.send({ type: "resend" }); }
     /** Binary frame with a tag byte in front (camera mode): 1 audio, 2 clip, 3 still. */

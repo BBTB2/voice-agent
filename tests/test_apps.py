@@ -43,6 +43,11 @@ def snarky_server():
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         if body["query"].startswith("broke"):
             return JSONResponse({"error": "Insufficient credits. Each query costs $0.25 (1 credit)."}, status_code=402)
+        if body["query"].startswith("bad"):
+            return JSONResponse({"error": "Bad request"}, status_code=400)
+        if body["query"].startswith("resetme"):
+            return {"answer": ANSWER, "citations": [], "figures": [], "creditsUsed": 0, "mode": "quick", "persona": "snarky",
+                    "archetype": "", "chatId": "chat-new", "threadId": "chat-new", "threadReset": True, "freeFollowupsLeft": 3}
         if body["query"].startswith("again"):
             return {"similar": {"id": "chat-old", "query": "amiodarone and the thyroid", "answer": "Old answer[^1] here.",
                                 "citations": [{"title": "Smith", "url": "u"}], "persona": "snarky", "saved": False,
@@ -197,6 +202,36 @@ def test_prof_snarky_thread_rides_along(app, snarky_server):
                        auth_reply="clerk-jwt")
         meta = next(e for e in events if e["type"] == "meta")
         assert meta["similar"] and "thread_id" not in meta
+
+
+def test_prof_snarky_thread_edge_cases(app, snarky_server):
+    c = TestClient(app.app)
+    uuid = "11111111-1111-1111-1111-111111111111"
+    with c.websocket_connect("/ws?token=snarky-token") as ws:
+        json.loads(ws.receive_text())
+        # a malformed thread id is not forwarded, and the page is told the thread was reset
+        events = _turn(ws, {"type": "text", "text": "and then?", "thread_id": "not-a-uuid"}, auth_reply="clerk-jwt")
+        assert "threadId" not in snarky_server[-1]["body"]
+        meta = next(e for e in events if e["type"] == "meta")
+        assert meta["thread_reset"] is True
+        # the site's own threadReset / freeFollowupsLeft pass through
+        events = _turn(ws, {"type": "text", "text": "resetme", "thread_id": uuid}, auth_reply="clerk-jwt")
+        meta = next(e for e in events if e["type"] == "meta")
+        assert meta["thread_reset"] is True and meta["free_followups_left"] == 3
+        # the turn after thread_id "" gets the new chat as its thread
+        events = _turn(ws, {"type": "text", "text": "fresh", "thread_id": ""}, auth_reply="clerk-jwt")
+        assert next(e for e in events if e["type"] == "meta")["thread_id"] == "chat-new"
+        # a reset message forgets the thread on the service side too
+        _turn(ws, {"type": "text", "text": "carry on", "thread_id": uuid}, auth_reply="clerk-jwt")
+        assert snarky_server[-1]["body"]["threadId"] == uuid
+        ws.send_text(json.dumps({"type": "reset"}))
+        assert json.loads(ws.receive_text())["type"] == "ready"
+        _turn(ws, {"type": "text", "text": "after reset"}, auth_reply="clerk-jwt")
+        assert "threadId" not in snarky_server[-1]["body"]
+        # a 400 is spoken with a next step
+        events = _turn(ws, {"type": "text", "text": "bad input"}, auth_reply="clerk-jwt")
+        err = next(e for e in events if e["type"] == "error")
+        assert err["kind"] == "auth" and "could not read that question" in err["text"] and "New question" in err["text"]
 
 
 def test_prof_snarky_refusals_are_spoken(app, snarky_server):
